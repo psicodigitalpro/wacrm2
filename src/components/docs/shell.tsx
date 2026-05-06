@@ -89,6 +89,14 @@ export function DocsShell({ pages, children }: DocsShellProps) {
 
         <main className="min-w-0 flex-1 py-10">{children}</main>
       </div>
+
+      <footer className="mt-10 border-t border-slate-800 bg-slate-950">
+        <div className="mx-auto w-full max-w-7xl px-4 py-6 text-xs leading-relaxed text-slate-600 sm:px-6">
+          WhatsApp® is a registered trademark of Meta Platforms, Inc.
+          Hostinger is not affiliated with, endorsed by, or sponsored by
+          Meta Platforms, Inc.
+        </div>
+      </footer>
     </div>
   )
 }
