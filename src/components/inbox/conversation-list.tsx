@@ -33,11 +33,14 @@ interface ConversationListProps {
 const STATUS_COLORS: Record<ConversationStatus, string> = {
   open: "bg-primary",
   pending: "bg-amber-500",
-  closed: "bg-slate-500",
+  closed: "bg-muted-foreground",
 };
 
-const FILTER_OPTIONS: { label: string; value: ConversationStatus | "all" }[] = [
+type InboxFilter = ConversationStatus | "all" | "unread";
+
+const FILTER_OPTIONS: { label: string; value: InboxFilter }[] = [
   { label: "All", value: "all" },
+  { label: "Unread", value: "unread" },
   { label: "Open", value: "open" },
   { label: "Pending", value: "pending" },
   { label: "Closed", value: "closed" },
@@ -51,7 +54,7 @@ export function ConversationList({
   resyncToken = 0,
 }: ConversationListProps) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<ConversationStatus | "all">("all");
+  const [filter, setFilter] = useState<InboxFilter>("all");
   const [loading, setLoading] = useState(true);
 
   // Keep the latest callback in a ref so the fetch effect below can
@@ -110,7 +113,9 @@ export function ConversationList({
   const filtered = useMemo(() => {
     let result = conversations;
 
-    if (filter !== "all") {
+    if (filter === "unread") {
+      result = result.filter((c) => c.unread_count > 0);
+    } else if (filter !== "all") {
       result = result.filter((c) => c.status === filter);
     }
 
@@ -147,27 +152,27 @@ export function ConversationList({
     // w-full on mobile so the list occupies the whole viewport when it's
     // the single pane showing; fixed 320px on desktop where it shares the
     // row with the thread + contact sidebar.
-    <div className="flex h-full w-full flex-col border-r border-slate-800 bg-slate-900 lg:w-80">
+    <div className="flex h-full w-full flex-col border-r border-border bg-card lg:w-80">
       {/* Search + Filter */}
-      <div className="space-y-2 border-b border-slate-800 p-3">
+      <div className="space-y-2 border-b border-border p-3">
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
             onChange={handleSearchChange}
             placeholder="Search conversations..."
-            className="border-slate-700 bg-slate-800 pl-9 text-sm text-white placeholder-slate-500 focus:border-primary/50"
+            className="border-border bg-muted pl-9 text-sm text-foreground placeholder-muted-foreground focus:border-primary/50"
           />
         </div>
 
         <DropdownMenu>
-          <DropdownMenuTrigger className="inline-flex items-center justify-center h-7 gap-1 px-2 text-xs text-slate-400 hover:text-white rounded-md hover:bg-slate-800">
+          <DropdownMenuTrigger className="inline-flex items-center justify-center h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground rounded-md hover:bg-muted">
               {activeFilter?.label ?? "All"}
               <ChevronDown className="h-3 w-3" />
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="start"
-            className="border-slate-700 bg-slate-800"
+            className="border-border bg-popover"
           >
             {FILTER_OPTIONS.map((opt) => (
               <DropdownMenuItem
@@ -177,7 +182,7 @@ export function ConversationList({
                   "text-sm",
                   filter === opt.value
                     ? "text-primary"
-                    : "text-slate-300"
+                    : "text-popover-foreground"
                 )}
               >
                 {opt.label}
@@ -200,7 +205,7 @@ export function ConversationList({
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-4 py-12 text-center">
-            <p className="text-sm text-slate-500">No conversations found</p>
+            <p className="text-sm text-muted-foreground">No conversations found</p>
           </div>
         ) : (
           <div className="flex flex-col">
@@ -248,12 +253,12 @@ function ConversationItem({
     <button
       onClick={handleClick}
       className={cn(
-        "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-slate-800/50",
-        isActive && "border-l-2 border-primary bg-slate-800/70"
+        "flex w-full items-start gap-3 px-3 py-3 text-left transition-colors hover:bg-muted/50",
+        isActive && "border-l-2 border-primary bg-muted/70"
       )}
     >
       {/* Avatar */}
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-white">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground">
         {contact?.avatar_url ? (
           <img
             src={contact.avatar_url}
@@ -268,13 +273,13 @@ function ConversationItem({
       {/* Content */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="truncate text-sm font-medium text-white">
+          <span className="truncate text-sm font-medium text-foreground">
             {displayName}
           </span>
-          <span className="shrink-0 text-[10px] text-slate-500">{timeAgo}</span>
+          <span className="shrink-0 text-[10px] text-muted-foreground">{timeAgo}</span>
         </div>
         <div className="mt-0.5 flex items-center justify-between gap-2">
-          <p className="truncate text-xs text-slate-400">
+          <p className="truncate text-xs text-muted-foreground">
             {conversation.last_message_text || "No messages yet"}
           </p>
           <div className="flex shrink-0 items-center gap-1.5">

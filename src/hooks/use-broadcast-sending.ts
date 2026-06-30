@@ -39,6 +39,13 @@ interface BroadcastPayload {
   template: MessageTemplate;
   audience: AudienceConfig;
   variables: Record<string, VariableMapping>;
+  /**
+   * Media URL for an IMAGE/VIDEO/DOCUMENT header. Required at send
+   * time for media-header templates — Meta rejects the send without
+   * it. Passed through as `messageParams.headerMediaUrl`; the builder
+   * falls back to the template's stored URL only when this is empty.
+   */
+  headerMediaUrl?: string;
 }
 
 interface UseBroadcastSendingReturn {
@@ -434,6 +441,19 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       let failedCount = 0;
       const totalRecipients = recipients.length;
 
+      // Media-header templates (image/video/document) require a media
+      // URL on every send. Collected in the personalize step and applied
+      // to all recipients; falls back to the template's stored URL on the
+      // server when omitted.
+      const headerType = payload.template.header_type;
+      const isMediaHeader =
+        headerType === 'image' ||
+        headerType === 'video' ||
+        headerType === 'document';
+      const headerMediaUrl = payload.headerMediaUrl?.trim();
+      const messageParams =
+        isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
+
       for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
         const batch = recipients.slice(i, i + SEND_BATCH_SIZE);
 
@@ -448,6 +468,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
                   customValueIndex.get(r.contact.id),
                 )
               : [],
+            ...(messageParams ? { messageParams } : {}),
           }));
 
         if (apiRecipients.length === 0) continue;

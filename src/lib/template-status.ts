@@ -20,7 +20,7 @@ export const templateStatusConfig: Record<
 > = {
   DRAFT: {
     label: 'Draft',
-    classes: 'bg-slate-600/20 text-slate-400 border-slate-600/30',
+    classes: 'bg-slate-600/20 text-muted-foreground border-slate-600/30',
   },
   PENDING: {
     label: 'Pending',
@@ -48,6 +48,6 @@ export const templateStatusConfig: Record<
   },
   PENDING_DELETION: {
     label: 'Pending Deletion',
-    classes: 'bg-slate-700/30 text-slate-500 border-slate-700/40',
+    classes: 'bg-slate-700/30 text-muted-foreground border-slate-700/40',
   },
 };

@@ -116,7 +116,9 @@ describe('buildSendComponents — header', () => {
     });
   });
 
-  it('prefers media id over url when both are available', () => {
+  it('does NOT use the resumable header_handle at send — falls back to the stored link', () => {
+    // header_handle is a template-CREATION sample handle, invalid as a
+    // send-time media id. The send must use the public link instead.
     const components = buildSendComponents(
       row({
         header_type: 'document',
@@ -126,7 +128,18 @@ describe('buildSendComponents — header', () => {
     );
     expect(components[0]).toEqual({
       type: 'header',
-      parameters: [{ type: 'document', document: { id: '4::aBc' } }],
+      parameters: [{ type: 'document', document: { link: 'https://x.com/doc.pdf' } }],
+    });
+  });
+
+  it('uses an explicit headerMediaId override as the media id', () => {
+    const components = buildSendComponents(
+      row({ header_type: 'image', header_media_url: 'https://x.com/s.jpg' }),
+      { headerMediaId: '9:realMediaId' },
+    );
+    expect(components[0]).toEqual({
+      type: 'header',
+      parameters: [{ type: 'image', image: { id: '9:realMediaId' } }],
     });
   });
 

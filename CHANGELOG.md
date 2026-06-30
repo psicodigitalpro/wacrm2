@@ -23,6 +23,20 @@ as the sole owner of their own account and sees identical data, and a
 solo owner who never invites anyone sees the same single-user app they
 always did.
 
+### Added
+
+- **Public REST API (`/api/v1`) — groundwork.** A scoped, revocable
+  **API key** system so you can drive wacrm from your own scripts and
+  automations. Create keys under **Settings → API keys** (admin+),
+  grant only the scopes each integration needs, and authenticate with
+  `Authorization: Bearer <key>`. Keys are account-scoped and stored
+  hashed (plaintext shown once). This release ships the auth layer,
+  scopes, per-key rate limiting, the management UI, and a
+  `GET /api/v1/me` probe to verify a key; the data endpoints
+  (`messages`, `contacts`, …) follow one at a time. See
+  `docs/public-api.md`. **Migration required:** apply
+  `supabase/migrations/026_api_keys.sql`. ([#245](https://github.com/ArnasDon/wacrm/issues/245))
+
 ### Changed
 
 - **Tenancy moves from per-user to per-account.** RLS on every

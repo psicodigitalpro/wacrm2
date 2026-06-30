@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/meta-api'
+import {
+  sendTextMessage,
+  sendTemplateMessage,
+  sendMediaMessage,
+  type MediaKind,
+} from '@/lib/whatsapp/meta-api'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
 import {
@@ -59,10 +64,15 @@ export async function POST(request: Request) {
 
     const body = await request.json()
     const {
-      conversation_id,
+      // `conversation_id` targets an existing thread (inbox). `contact_id`
+      // lets a caller initiate from a contact that may have no conversation
+      // yet (Contact detail → Send template) — we find-or-create one below.
+      conversation_id: conversationIdInput,
+      contact_id,
       message_type,
       content_text,
       media_url,
+      filename,
       template_name,
       template_language,
       template_params,
@@ -70,9 +80,27 @@ export async function POST(request: Request) {
       reply_to_message_id,
     } = body
 
-    if (!conversation_id || !message_type) {
+    if ((!conversationIdInput && !contact_id) || !message_type) {
       return NextResponse.json(
-        { error: 'conversation_id and message_type are required' },
+        {
+          error:
+            'Either conversation_id or contact_id, plus message_type, are required',
+        },
+        { status: 400 }
+      )
+    }
+
+    // Media kinds (image/video/document/audio) are sent to Meta via a
+    // public URL the composer already uploaded to the chat-media bucket.
+    const MEDIA_KINDS = ['image', 'video', 'document', 'audio'] as const
+    const isMediaKind = (MEDIA_KINDS as readonly string[]).includes(message_type)
+
+    // Reject anything outside the known set up front rather than letting
+    // an unknown type fall through to the text path with empty content.
+    const VALID_MESSAGE_TYPES = ['text', 'template', ...MEDIA_KINDS] as const
+    if (!(VALID_MESSAGE_TYPES as readonly string[]).includes(message_type)) {
+      return NextResponse.json(
+        { error: `Unsupported message_type "${message_type}"` },
         { status: 400 }
       )
     }
@@ -91,20 +119,89 @@ export async function POST(request: Request) {
       )
     }
 
-    // Fetch conversation and contact
-    const { data: conversation, error: convError } = await supabase
-      .from('conversations')
-      .select('*, contact:contacts(*)')
-      .eq('id', conversation_id)
-      .eq('account_id', accountId)
-      .single()
+    if (isMediaKind && !media_url) {
+      return NextResponse.json(
+        { error: `media_url is required for ${message_type} messages` },
+        { status: 400 }
+      )
+    }
 
-    if (convError || !conversation) {
+    // Meta caps media captions at 1024 chars; reject before the upload is
+    // wasted at the Meta call. (Audio carries no caption — see meta-api.)
+    if (
+      isMediaKind &&
+      message_type !== 'audio' &&
+      typeof content_text === 'string' &&
+      content_text.length > 1024
+    ) {
+      return NextResponse.json(
+        { error: 'Caption exceeds the 1024-character limit' },
+        { status: 400 }
+      )
+    }
+
+    // Resolve the target conversation. With `conversation_id` we load the
+    // existing thread; with `contact_id` we find-or-create one for the
+    // contact so a business-initiated template send (Contact detail view)
+    // reuses this whole path — phone variants, send-builder, persistence.
+    let conversation: { id: string; contact?: { id: string; phone?: string } | null } | null = null
+
+    if (conversationIdInput) {
+      const { data, error: convError } = await supabase
+        .from('conversations')
+        .select('*, contact:contacts(*)')
+        .eq('id', conversationIdInput)
+        .eq('account_id', accountId)
+        .single()
+
+      if (convError || !data) {
+        return NextResponse.json(
+          { error: 'Conversation not found' },
+          { status: 404 }
+        )
+      }
+      conversation = data
+    } else {
+      // contact_id path: verify the contact is in this account first so a
+      // caller can't open a conversation against someone else's contact.
+      const { data: contactRow, error: contactErr } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('id', contact_id)
+        .eq('account_id', accountId)
+        .maybeSingle()
+
+      if (contactErr || !contactRow) {
+        return NextResponse.json(
+          { error: 'Contact not found' },
+          { status: 404 }
+        )
+      }
+
+      const resolved = await findOrCreateConversation(
+        supabase,
+        accountId,
+        user.id,
+        contact_id
+      )
+      if (!resolved) {
+        return NextResponse.json(
+          { error: 'Failed to open a conversation for this contact' },
+          { status: 500 }
+        )
+      }
+      // The embed may not round-trip on insert; pin the contact we verified.
+      conversation = { ...resolved, contact: resolved.contact ?? contactRow }
+    }
+
+    if (!conversation) {
       return NextResponse.json(
         { error: 'Conversation not found' },
         { status: 404 }
       )
     }
+
+    const conversation_id = conversation.id
 
     const contact = conversation.contact
     if (!contact?.phone) {
@@ -246,6 +343,22 @@ export async function POST(request: Request) {
         })
         return result.messageId
       }
+      if (isMediaKind) {
+        // content_text doubles as the caption (ignored for audio inside
+        // sendMediaMessage). filename surfaces in the recipient's chat
+        // for documents only.
+        const result = await sendMediaMessage({
+          phoneNumberId: config.phone_number_id,
+          accessToken,
+          to: phone,
+          kind: message_type as MediaKind,
+          link: media_url,
+          caption: content_text || undefined,
+          filename: filename || undefined,
+          contextMessageId,
+        })
+        return result.messageId
+      }
       const result = await sendTextMessage({
         phoneNumberId: config.phone_number_id,
         accessToken,
@@ -383,4 +496,46 @@ export async function POST(request: Request) {
       { status: 500 }
     )
   }
+}
+
+type SendSupabase = Awaited<ReturnType<typeof createClient>>
+
+/**
+ * Return the contact's conversation in this account, creating one if it
+ * doesn't exist yet. Mirrors the webhook's find-or-create so an
+ * inbound-then-outbound (or outbound-first) sequence converges on a single
+ * thread per contact. Runs under the caller's RLS — the conversations_insert
+ * policy requires account agent membership, which the caller already is.
+ */
+async function findOrCreateConversation(
+  supabase: SendSupabase,
+  accountId: string,
+  userId: string,
+  contactId: string,
+) {
+  const { data: existing } = await supabase
+    .from('conversations')
+    .select('*, contact:contacts(*)')
+    .eq('account_id', accountId)
+    .eq('contact_id', contactId)
+    .maybeSingle()
+
+  if (existing) return existing
+
+  const { data: created, error } = await supabase
+    .from('conversations')
+    .insert({
+      account_id: accountId,
+      user_id: userId,
+      contact_id: contactId,
+    })
+    .select('*, contact:contacts(*)')
+    .single()
+
+  if (error) {
+    console.error('Error creating conversation for contact send:', error.message)
+    return null
+  }
+
+  return created
 }

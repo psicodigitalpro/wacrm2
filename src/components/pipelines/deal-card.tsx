@@ -39,10 +39,10 @@ export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
         e.stopPropagation();
         onEdit(deal);
       }}
-      className={`group relative w-full cursor-pointer rounded-xl border border-slate-700/50 bg-slate-800/70 pl-4 pr-3 py-3 text-left shadow-sm transition-all ${
+      className={`group relative w-full cursor-pointer rounded-xl border border-border/50 bg-muted/70 pl-4 pr-3 py-3 text-left shadow-sm transition-all ${
         isOverlay
           ? "shadow-xl"
-          : "hover:-translate-y-0.5 hover:border-slate-600 hover:bg-slate-800 hover:shadow-lg"
+          : "hover:-translate-y-0.5 hover:border-border hover:bg-muted hover:shadow-lg"
       }`}
     >
       {/* 4px left accent bar using stage color */}
@@ -53,7 +53,7 @@ export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
       />
 
       <div className="flex items-start justify-between gap-2">
-        <h4 className="flex-1 text-sm font-semibold leading-snug text-white break-words">
+        <h4 className="flex-1 text-sm font-semibold leading-snug text-foreground break-words">
           {deal.title}
         </h4>
         {deal.status === "won" && (
@@ -72,10 +72,10 @@ export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
 
       {/* Contact row */}
       <div className="mt-2 flex items-center gap-2">
-        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-slate-700 text-[10px] font-semibold text-slate-200">
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-foreground">
           {initials(deal.contact?.name, deal.contact?.phone)}
         </span>
-        <span className="truncate text-xs text-slate-400">{contactLabel}</span>
+        <span className="truncate text-xs text-muted-foreground">{contactLabel}</span>
       </div>
 
       <div className="mt-2 flex items-center justify-between">
@@ -83,7 +83,7 @@ export function DealCard({ deal, stage, onEdit, isOverlay }: DealCardProps) {
           {formatCurrency(deal.value, deal.currency)}
         </span>
         {deal.expected_close_date && (
-          <span className="flex items-center gap-1 text-[11px] text-slate-500">
+          <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
             <Calendar className="h-3 w-3" />
             {formatDate(deal.expected_close_date)}
           </span>

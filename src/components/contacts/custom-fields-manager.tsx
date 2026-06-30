@@ -33,10 +33,10 @@ export function CustomFieldsManager({
 }: CustomFieldsManagerProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-slate-700 bg-slate-900 text-slate-200 sm:max-w-md">
+      <DialogContent className="border-border bg-popover text-popover-foreground sm:max-w-md">
         <DialogHeader>
-          <DialogTitle className="text-white">Custom fields</DialogTitle>
-          <DialogDescription className="text-slate-400">
+          <DialogTitle className="text-popover-foreground">Custom fields</DialogTitle>
+          <DialogDescription className="text-muted-foreground">
             Define extra contact fields (e.g. ZIP code, lead source). They
             appear on every contact and in the “Update Contact Field” automation
             action.
@@ -185,7 +185,7 @@ export function CustomFieldsPanel() {
             }
           }}
           placeholder="New field name…"
-          className="bg-slate-800 text-white"
+          className="bg-muted text-foreground"
         />
         <Button
           onClick={handleCreate}
@@ -202,18 +202,18 @@ export function CustomFieldsPanel() {
       </div>
 
       {/* List */}
-      <div className="max-h-72 overflow-y-auto rounded-md border border-slate-800">
+      <div className="max-h-72 overflow-y-auto rounded-md border border-border">
         {loading ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-500">
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
             Loading…
           </div>
         ) : fields.length === 0 ? (
-          <p className="py-8 text-center text-sm text-slate-500">
+          <p className="py-8 text-center text-sm text-muted-foreground">
             No custom fields yet.
           </p>
         ) : (
-          <ul className="divide-y divide-slate-800">
+          <ul className="divide-y divide-border">
             {fields.map((field) => (
               <FieldRow
                 key={field.id}
@@ -265,7 +265,7 @@ function FieldRow({
           if (e.key === 'Enter') e.currentTarget.blur();
         }}
         aria-label={`Rename ${field.field_name}`}
-        className="focus:border-primary h-8 border-transparent bg-transparent text-white hover:border-slate-700"
+        className="focus:border-primary h-8 border-transparent bg-transparent text-foreground hover:border-border"
       />
       <Button
         variant="ghost"
@@ -273,7 +273,7 @@ function FieldRow({
         disabled={busy}
         onClick={() => onDelete(field)}
         title="Delete field"
-        className="shrink-0 text-slate-400 hover:text-red-400"
+        className="shrink-0 text-muted-foreground hover:text-red-400"
       >
         {busy ? (
           <Loader2 className="size-4 animate-spin" />

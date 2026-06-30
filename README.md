@@ -40,6 +40,9 @@ clone or fork it to run your own CRM.
   is account-scoped, so one shared inbox can be staffed by a whole
   team. Solo use stays single-user with zero setup.
 - **Account management** — email, password, avatar, global sign-out.
+- **Public REST API** (`/api/v1`) with scoped, revocable API keys —
+  build your own automations on top of your CRM. See
+  [docs/public-api.md](./docs/public-api.md).
 
 ## Why fork this?
 

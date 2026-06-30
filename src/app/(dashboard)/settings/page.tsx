@@ -1,179 +1,84 @@
 'use client';
 
+import { useMemo, type ReactNode } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import {
-  Settings,
-  MessageSquare,
-  Tag,
-  User,
-  Palette,
-  UsersRound,
-  Coins,
-  SlidersHorizontal,
-} from 'lucide-react';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { useCan } from '@/hooks/use-can';
+
+import { useAuth } from '@/hooks/use-auth';
+import { useTheme } from '@/hooks/use-theme';
+import { SettingsRail } from '@/components/settings/settings-rail';
+import { SettingsOverview } from '@/components/settings/settings-overview';
+import { ProfileForm } from '@/components/settings/profile-form';
+import { SecurityPanel } from '@/components/settings/security-panel';
+import { AppearancePanel } from '@/components/settings/appearance-panel';
 import { WhatsAppConfig } from '@/components/settings/whatsapp-config';
 import { TemplateManager } from '@/components/settings/template-manager';
-import { TagManager } from '@/components/settings/tag-manager';
-import { ProfileForm } from '@/components/settings/profile-form';
-import { PasswordForm } from '@/components/settings/password-form';
-import { SessionsCard } from '@/components/settings/sessions-card';
-import { AppearancePanel } from '@/components/settings/appearance-panel';
-import { MembersTab } from '@/components/settings/members-tab';
+import { FieldsAndTagsPanel } from '@/components/settings/fields-and-tags-panel';
 import { DealsSettings } from '@/components/settings/deals-settings';
-import { CustomFieldsSettings } from '@/components/settings/custom-fields-settings';
-
-const TAB_VALUES = [
-  'profile',
-  'whatsapp',
-  'templates',
-  'tags',
-  'custom-fields',
-  'deals',
-  'appearance',
-  'members',
-] as const;
-type TabValue = (typeof TAB_VALUES)[number];
-
-function isTabValue(v: string | null): v is TabValue {
-  return !!v && (TAB_VALUES as readonly string[]).includes(v);
-}
+import { MembersTab } from '@/components/settings/members-tab';
+import { ApiKeysSettings } from '@/components/settings/api-keys-settings';
+import {
+  resolveSection,
+  type SettingsSection,
+} from '@/components/settings/settings-sections';
 
 export default function SettingsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { defaultCurrency } = useAuth();
+  const { mode } = useTheme();
 
-  // Custom-field definitions are account-wide config, so editing them is
-  // admin+ only — mirror the gate on the Contacts page. The `custom_fields`
-  // RLS rejects non-admin writes regardless.
-  const canEditSettings = useCan('edit-settings');
+  // The URL (`?tab=`) is the single source of truth for the active
+  // section — deep-linkable, and it keeps the existing links in the
+  // app sidebar/header working. Legacy tab values (tags, custom-fields)
+  // resolve onto their new home; unknown/empty → the Overview landing.
+  const section = resolveSection(searchParams.get('tab'));
 
-  // The URL is the single source of truth for the active tab — no
-  // local state, no sync effect. A previous revision duplicated this
-  // into `useState` + a sync effect, which tripped React 19's
-  // set-state-in-effect rule and was also redundant.
-  const queryTab = searchParams.get('tab');
-  // Deep-linking to the admin-only tab as a non-admin falls back to profile
-  // rather than landing on a tab with no trigger or content.
-  const resolved: TabValue = isTabValue(queryTab) ? queryTab : 'profile';
-  const tab: TabValue =
-    resolved === 'custom-fields' && !canEditSettings ? 'profile' : resolved;
-
-  const onChange = (next: TabValue) => {
+  const go = (next: SettingsSection) => {
     const params = new URLSearchParams(searchParams.toString());
     params.set('tab', next);
     router.replace(`/settings?${params.toString()}`, { scroll: false });
   };
 
+  // Cheap, fetch-free rail hints. The Overview landing carries the
+  // full live status/counts; the rail just surfaces the two that are
+  // already in context.
+  const hints: Partial<Record<SettingsSection, ReactNode>> = useMemo(
+    () => ({
+      appearance: mode.charAt(0).toUpperCase() + mode.slice(1),
+      deals: defaultCurrency,
+    }),
+    [mode, defaultCurrency],
+  );
+
+  const panel: Record<SettingsSection, ReactNode> = {
+    overview: <SettingsOverview onSelect={go} />,
+    profile: <ProfileForm />,
+    security: <SecurityPanel />,
+    appearance: <AppearancePanel />,
+    whatsapp: <WhatsAppConfig />,
+    templates: <TemplateManager />,
+    fields: <FieldsAndTagsPanel />,
+    deals: <DealsSettings />,
+    members: <MembersTab />,
+    api: <ApiKeysSettings />,
+  };
+
   return (
-    <div className="space-y-6">
+    <div>
       <div>
-        <h1 className="text-2xl font-bold text-white">Settings</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          Manage your profile, WhatsApp® integration, message templates, and
-          tags.
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">
+          Settings
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Everything in one place — your account and your workspace. Pick a
+          section to manage it.
         </p>
       </div>
 
-      <Tabs value={tab} onValueChange={(v) => onChange(v as TabValue)}>
-        <TabsList className="border border-slate-700 bg-slate-900">
-          <TabsTrigger
-            value="profile"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <User className="size-4" />
-            Profile
-          </TabsTrigger>
-          <TabsTrigger
-            value="whatsapp"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <Settings className="size-4" />
-            WhatsApp Config
-          </TabsTrigger>
-          <TabsTrigger
-            value="templates"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <MessageSquare className="size-4" />
-            Templates
-          </TabsTrigger>
-          <TabsTrigger
-            value="tags"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <Tag className="size-4" />
-            Tags
-          </TabsTrigger>
-          {canEditSettings && (
-            <TabsTrigger
-              value="custom-fields"
-              className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-            >
-              <SlidersHorizontal className="size-4" />
-              Custom Fields
-            </TabsTrigger>
-          )}
-          <TabsTrigger
-            value="deals"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <Coins className="size-4" />
-            Deals
-          </TabsTrigger>
-          <TabsTrigger
-            value="appearance"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <Palette className="size-4" />
-            Appearance
-          </TabsTrigger>
-          <TabsTrigger
-            value="members"
-            className="data-active:text-primary text-slate-400 data-active:bg-slate-800"
-          >
-            <UsersRound className="size-4" />
-            Members
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="profile" className="space-y-6">
-          <ProfileForm />
-          <PasswordForm />
-          <SessionsCard />
-        </TabsContent>
-
-        <TabsContent value="whatsapp">
-          <WhatsAppConfig />
-        </TabsContent>
-
-        <TabsContent value="templates">
-          <TemplateManager />
-        </TabsContent>
-
-        <TabsContent value="tags">
-          <TagManager />
-        </TabsContent>
-
-        {canEditSettings && (
-          <TabsContent value="custom-fields">
-            <CustomFieldsSettings />
-          </TabsContent>
-        )}
-
-        <TabsContent value="deals">
-          <DealsSettings />
-        </TabsContent>
-
-        <TabsContent value="appearance">
-          <AppearancePanel />
-        </TabsContent>
-
-        <TabsContent value="members">
-          <MembersTab />
-        </TabsContent>
-      </Tabs>
+      <div className="mt-6 grid gap-6 lg:grid-cols-[236px_minmax(0,1fr)] lg:items-start">
+        <SettingsRail active={section} onSelect={go} hints={hints} />
+        <div className="min-w-0">{panel[section]}</div>
+      </div>
     </div>
   );
 }

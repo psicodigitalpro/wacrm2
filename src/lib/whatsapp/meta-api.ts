@@ -259,7 +259,7 @@ export async function sendTextMessage(
   return { messageId: data.messages[0].id }
 }
 
-export type MediaKind = 'image' | 'video' | 'document'
+export type MediaKind = 'image' | 'video' | 'document' | 'audio'
 
 export interface SendMediaMessageArgs {
   phoneNumberId: string
@@ -268,19 +268,24 @@ export interface SendMediaMessageArgs {
   kind: MediaKind
   /** Public URL Meta fetches at send time. */
   link: string
-  /** Optional caption — Meta caps at 1024 chars. Documents + images + videos all accept it. */
+  /** Optional caption — Meta caps at 1024 chars. Documents + images + videos accept it; audio does NOT. */
   caption?: string
-  /** Document-only. Shown in the recipient's chat as the file name. Ignored for image/video. */
+  /** Document-only. Shown in the recipient's chat as the file name. Ignored for image/video/audio. */
   filename?: string
   contextMessageId?: string
 }
 
 /**
- * Send an image, video, or document via a public URL.
+ * Send an image, video, document, or audio (voice note) via a public URL.
  *
- * Used by the Flows engine's `send_media` node. Mirrors
- * `sendTextMessage` — single fetch, throws on non-2xx, returns Meta's
- * message id.
+ * Used by the Flows engine's `send_media` node and the inbox composer's
+ * agent-initiated media sends. Mirrors `sendTextMessage` — single fetch,
+ * throws on non-2xx, returns Meta's message id.
+ *
+ * Audio is special-cased: Meta rejects `caption` and `filename` on audio
+ * messages, so we send `{ link }` only. WhatsApp auto-renders an
+ * OGG/Opus file as a playable voice note (waveform) rather than a file
+ * attachment.
  */
 export async function sendMediaMessage(
   args: SendMediaMessageArgs,
@@ -289,8 +294,11 @@ export async function sendMediaMessage(
   if (!link) throw new Error('sendMediaMessage requires a link.')
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
 
+  // Audio accepts neither caption nor filename per Meta's spec — adding
+  // either yields a 400. image/video/document accept a caption; only
+  // document accepts a filename.
   const media: Record<string, unknown> = { link }
-  if (caption) media.caption = caption
+  if (caption && kind !== 'audio') media.caption = caption
   if (kind === 'document' && filename) media.filename = filename
 
   const body: Record<string, unknown> = {
@@ -433,6 +441,83 @@ export async function sendTemplateMessage(
   }
   const data = await response.json()
   return { messageId: data.messages[0].id }
+}
+
+// ============================================================
+// Resumable Upload (media handles for template headers)
+// ============================================================
+//
+// Creating a message template with a media HEADER (image/video/
+// document) requires an `example.header_handle` — Meta does NOT accept
+// a plain public URL at creation time. The handle comes from the
+// two-step Resumable Upload API, which is keyed on the Meta APP id (not
+// the phone number / WABA):
+//
+//   1. POST /{app_id}/uploads?file_name&file_length&file_type&access_token
+//        → { id: "upload:<session>" }
+//   2. POST /{id}  (Authorization: OAuth <token>, file_offset: 0, raw bytes)
+//        → { h: "<handle>" }
+//
+// See https://developers.facebook.com/docs/graph-api/guides/upload
+
+export interface UploadResumableMediaArgs {
+  /** Meta App id (env META_APP_ID) — resumable upload is app-scoped. */
+  appId: string
+  accessToken: string
+  fileName: string
+  mimeType: string
+  bytes: Uint8Array
+}
+
+/**
+ * Upload a file via the Resumable Upload API and return the media
+ * handle to use as `example.header_handle` when creating/editing a
+ * template with a media header.
+ */
+export async function uploadResumableMedia(
+  args: UploadResumableMediaArgs,
+): Promise<{ handle: string }> {
+  const { appId, accessToken, fileName, mimeType, bytes } = args
+
+  // Step 1 — open an upload session.
+  const startParams = new URLSearchParams({
+    file_name: fileName,
+    file_length: String(bytes.byteLength),
+    file_type: mimeType,
+    access_token: accessToken,
+  })
+  const startRes = await fetch(
+    `${META_API_BASE}/${appId}/uploads?${startParams.toString()}`,
+    { method: 'POST' },
+  )
+  if (!startRes.ok) {
+    await throwMetaError(startRes, `Resumable upload start failed: ${startRes.status}`)
+  }
+  const startData = (await startRes.json()) as { id?: string }
+  if (!startData.id) {
+    throw new Error('Resumable upload did not return a session id.')
+  }
+
+  // Step 2 — upload the bytes. Note the `OAuth` auth scheme (not Bearer)
+  // and the file_offset header, both required by this endpoint.
+  const uploadRes = await fetch(`${META_API_BASE}/${startData.id}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `OAuth ${accessToken}`,
+      file_offset: '0',
+    },
+    // Uint8Array is a valid BodyInit at runtime; cast around the
+    // lib.dom ArrayBufferLike-vs-ArrayBuffer generic mismatch.
+    body: bytes as unknown as BodyInit,
+  })
+  if (!uploadRes.ok) {
+    await throwMetaError(uploadRes, `Resumable upload failed: ${uploadRes.status}`)
+  }
+  const uploadData = (await uploadRes.json()) as { h?: string }
+  if (!uploadData.h) {
+    throw new Error('Resumable upload did not return a file handle.')
+  }
+  return { handle: uploadData.h }
 }
 
 // ============================================================
