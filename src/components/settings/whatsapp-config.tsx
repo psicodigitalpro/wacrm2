@@ -92,6 +92,20 @@ export function WhatsAppConfig() {
   // phone, so this is the only way the UI learns it succeeded.
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Evolution API fields — same shape as the uazapi block above (an
+  // instance URL + a per-instance credential + an instance name), kept
+  // as its own set of hooks rather than generalized, matching how the
+  // uazapi block was kept separate from Meta's.
+  const [evolutionBaseUrl, setEvolutionBaseUrl] = useState('');
+  const [evolutionApiKey, setEvolutionApiKey] = useState('');
+  const [evolutionApiKeyEdited, setEvolutionApiKeyEdited] = useState(false);
+  const [evolutionInstanceName, setEvolutionInstanceName] = useState('');
+  const [savingEvolution, setSavingEvolution] = useState(false);
+  const [connectingEvolution, setConnectingEvolution] = useState(false);
+  const [evolutionConnected, setEvolutionConnected] = useState(false);
+  const [evolutionPhone, setEvolutionPhone] = useState<string | null>(null);
+  const evolutionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // True once /register has succeeded on Meta's side (timestamp set
   // in the row). When false, the saved config is metadata-only and
   // Meta will silently drop every inbound event — that's the
@@ -152,6 +166,12 @@ export function WhatsAppConfig() {
         setInstanceTokenEdited(false);
         setInstanceName(data.instance_name || '');
         setUazapiPhone(data.paired_phone || null);
+
+        setEvolutionBaseUrl(data.evolution_base_url || '');
+        setEvolutionApiKey(data.evolution_api_key ? MASKED_TOKEN : '');
+        setEvolutionApiKeyEdited(false);
+        setEvolutionInstanceName(data.evolution_instance_name || '');
+        setEvolutionPhone(data.evolution_paired_phone || null);
       } else {
         setConfig(null);
         setPhoneNumberId('');
@@ -166,6 +186,12 @@ export function WhatsAppConfig() {
         setInstanceTokenEdited(false);
         setInstanceName('');
         setUazapiPhone(null);
+
+        setEvolutionBaseUrl('');
+        setEvolutionApiKey('');
+        setEvolutionApiKeyEdited(false);
+        setEvolutionInstanceName('');
+        setEvolutionPhone(null);
       }
       // Clear any stale probe result when reloading the row.
       setRegistrationProbe(null);
@@ -173,7 +199,7 @@ export function WhatsAppConfig() {
       setPairingCode(null);
 
       // Then verify health via the provider-specific API (decrypts
-      // token + pings Meta or uazapi).
+      // token + pings Meta, uazapi, or Evolution).
       if (data && rowProvider === 'uazapi') {
         try {
           const res = await fetch('/api/whatsapp/config/uazapi', { method: 'GET' });
@@ -186,6 +212,20 @@ export function WhatsAppConfig() {
         } catch (err) {
           console.error('uazapi health check failed:', err);
           setUazapiConnected(false);
+          setConnectionStatus('disconnected');
+        }
+      } else if (data && rowProvider === 'evolution') {
+        try {
+          const res = await fetch('/api/whatsapp/config/evolution', { method: 'GET' });
+          const payload = await res.json();
+          setEvolutionConnected(Boolean(payload.connected));
+          if (payload.phone) setEvolutionPhone(payload.phone);
+          setConnectionStatus(payload.connected ? 'connected' : 'disconnected');
+          setResetReason(payload.needs_reset ? 'token_corrupted' : null);
+          setStatusMessage(payload.message || '');
+        } catch (err) {
+          console.error('Evolution health check failed:', err);
+          setEvolutionConnected(false);
           setConnectionStatus('disconnected');
         }
       } else if (data) {
@@ -211,6 +251,7 @@ export function WhatsAppConfig() {
         setResetReason(null);
         setStatusMessage('');
         setUazapiConnected(false);
+        setEvolutionConnected(false);
       }
     } catch (err) {
       console.error('fetchConfig error:', err);
@@ -355,6 +396,28 @@ export function WhatsAppConfig() {
       return;
     }
 
+    if (provider === 'evolution') {
+      try {
+        setTesting(true);
+        const res = await fetch('/api/whatsapp/config/evolution', { method: 'GET' });
+        const payload = await res.json();
+        setEvolutionConnected(Boolean(payload.connected));
+        if (payload.phone) setEvolutionPhone(payload.phone);
+        setConnectionStatus(payload.connected ? 'connected' : 'disconnected');
+        setStatusMessage(payload.message || '');
+        toast[payload.connected ? 'success' : 'error'](
+          payload.connected ? 'Evolution instance is connected' : payload.message || 'Not connected'
+        );
+      } catch (err) {
+        console.error('Evolution test connection error:', err);
+        setConnectionStatus('disconnected');
+        toast.error('Connection test failed. Check network and try again.');
+      } finally {
+        setTesting(false);
+      }
+      return;
+    }
+
     try {
       setTesting(true);
       const res = await fetch('/api/whatsapp/config', { method: 'GET' });
@@ -417,7 +480,12 @@ export function WhatsAppConfig() {
 
     try {
       setResetting(true);
-      const endpoint = provider === 'uazapi' ? '/api/whatsapp/config/uazapi' : '/api/whatsapp/config';
+      const endpoint =
+        provider === 'uazapi'
+          ? '/api/whatsapp/config/uazapi'
+          : provider === 'evolution'
+            ? '/api/whatsapp/config/evolution'
+            : '/api/whatsapp/config';
       const res = await fetch(endpoint, { method: 'DELETE' });
       const data = await res.json();
 
@@ -439,6 +507,12 @@ export function WhatsAppConfig() {
       setInstanceName('');
       setUazapiConnected(false);
       setUazapiPhone(null);
+      setEvolutionBaseUrl('');
+      setEvolutionApiKey('');
+      setEvolutionApiKeyEdited(false);
+      setEvolutionInstanceName('');
+      setEvolutionConnected(false);
+      setEvolutionPhone(null);
       setQrCode(null);
       setPairingCode(null);
       setConnectionStatus('disconnected');
@@ -558,6 +632,114 @@ export function WhatsAppConfig() {
     }
   }
 
+  function stopEvolutionPolling() {
+    if (evolutionPollRef.current) {
+      clearInterval(evolutionPollRef.current);
+      evolutionPollRef.current = null;
+    }
+  }
+
+  useEffect(() => stopEvolutionPolling, []);
+
+  async function handleSaveEvolution() {
+    if (!evolutionBaseUrl.trim()) {
+      toast.error('Instance URL is required');
+      return;
+    }
+    if (!evolutionInstanceName.trim()) {
+      toast.error('Instance name is required');
+      return;
+    }
+    if (!config && (!evolutionApiKey.trim() || !evolutionApiKeyEdited)) {
+      toast.error('API Key is required for initial setup');
+      return;
+    }
+    if (evolutionApiKeyEdited === false && evolutionApiKey === MASKED_TOKEN) {
+      toast.error('Please re-enter the API Key to save changes');
+      return;
+    }
+
+    try {
+      setSavingEvolution(true);
+      const res = await fetch('/api/whatsapp/config/evolution', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_url: evolutionBaseUrl.trim(),
+          instance_name: evolutionInstanceName.trim(),
+          api_key: evolutionApiKey.trim(),
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to save configuration');
+        return;
+      }
+
+      toast.success(
+        data.connected
+          ? 'Evolution instance saved and already connected.'
+          : 'Evolution instance saved. Click Connect to pair via QR code.'
+      );
+      if (accountId) await fetchConfig(accountId);
+    } catch (err) {
+      console.error('Evolution save error:', err);
+      toast.error('Failed to save configuration');
+    } finally {
+      setSavingEvolution(false);
+    }
+  }
+
+  async function handleConnectEvolution() {
+    try {
+      setConnectingEvolution(true);
+      setQrCode(null);
+      setPairingCode(null);
+      const res = await fetch('/api/whatsapp/config/evolution/connect', { method: 'POST' });
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to start pairing');
+        return;
+      }
+
+      setQrCode(data.qr_code || null);
+      setPairingCode(data.pairing_code || null);
+
+      // Same polling shape as uazapi's connect flow — pairing happens
+      // on the phone, so polling status is the only way the UI learns
+      // it succeeded.
+      stopEvolutionPolling();
+      let attempts = 0;
+      evolutionPollRef.current = setInterval(async () => {
+        attempts += 1;
+        try {
+          const statusRes = await fetch('/api/whatsapp/config/evolution', { method: 'GET' });
+          const statusPayload = await statusRes.json();
+          if (statusPayload.connected) {
+            stopEvolutionPolling();
+            setEvolutionConnected(true);
+            setEvolutionPhone(statusPayload.phone || null);
+            setConnectionStatus('connected');
+            setQrCode(null);
+            setPairingCode(null);
+            toast.success('WhatsApp connected via Evolution.');
+            if (accountId) await fetchConfig(accountId);
+          }
+        } catch (err) {
+          console.error('Evolution status poll failed:', err);
+        }
+        if (attempts >= 40) stopEvolutionPolling();
+      }, 3000);
+    } catch (err) {
+      console.error('Evolution connect error:', err);
+      toast.error('Failed to start pairing');
+    } finally {
+      setConnectingEvolution(false);
+    }
+  }
+
   function handleCopyWebhookUrl() {
     navigator.clipboard.writeText(webhookUrl);
     toast.success('Webhook URL copied to clipboard');
@@ -595,8 +777,8 @@ export function WhatsAppConfig() {
         <Card>
           <CardContent className="pt-6">
             <Label className="text-muted-foreground mb-2 block">{t('providerLabel')}</Label>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {(['meta', 'uazapi'] as const).map((p) => (
+            <div className="grid gap-3 sm:grid-cols-3">
+              {(['meta', 'uazapi', 'evolution'] as const).map((p) => (
                 <button
                   key={p}
                   type="button"
@@ -615,10 +797,10 @@ export function WhatsAppConfig() {
                   )}
                   <span>
                     <span className="block text-sm font-medium text-foreground">
-                      {p === 'meta' ? t('providerMeta') : t('providerUazapi')}
+                      {p === 'meta' ? t('providerMeta') : p === 'uazapi' ? t('providerUazapi') : t('providerEvolution')}
                     </span>
                     <span className="block text-xs text-muted-foreground mt-0.5">
-                      {p === 'meta' ? t('providerMetaDesc') : t('providerUazapiDesc')}
+                      {p === 'meta' ? t('providerMetaDesc') : p === 'uazapi' ? t('providerUazapiDesc') : t('providerEvolutionDesc')}
                     </span>
                   </span>
                 </button>
@@ -707,6 +889,27 @@ export function WhatsAppConfig() {
               {uazapiConnected
                 ? t('uazapiConnectedDesc', { phone: uazapiPhone || '' })
                 : statusMessage || t('uazapiNotConnectedDesc')}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Connection Status (Evolution) */}
+        {provider === 'evolution' && config && (
+          <Alert className="bg-card border-border">
+            <div className="flex items-center gap-2">
+              {evolutionConnected ? (
+                <CheckCircle2 className="size-4 text-primary" />
+              ) : (
+                <XCircle className="size-4 text-red-500" />
+              )}
+              <AlertTitle className="text-foreground mb-0">
+                {evolutionConnected ? t('evolutionConnected') : t('evolutionNotConnected')}
+              </AlertTitle>
+            </div>
+            <AlertDescription className="text-muted-foreground">
+              {evolutionConnected
+                ? t('evolutionConnectedDesc', { phone: evolutionPhone || '' })
+                : statusMessage || t('evolutionNotConnectedDesc')}
             </AlertDescription>
           </Alert>
         )}
@@ -1073,6 +1276,131 @@ export function WhatsAppConfig() {
         </Card>
         )}
 
+        {/* Evolution Instance — credentials + QR pairing */}
+        {provider === 'evolution' && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-foreground">{t('evolutionCredentialsTitle')}</CardTitle>
+            <CardDescription className="text-muted-foreground">
+              {t('evolutionCredentialsDesc')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('evolutionBaseUrl')}</Label>
+              <Input
+                placeholder={t('evolutionBaseUrlPlaceholder')}
+                value={evolutionBaseUrl}
+                onChange={(e) => setEvolutionBaseUrl(e.target.value)}
+                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('evolutionInstanceName')}</Label>
+              <Input
+                placeholder={t('evolutionInstanceNamePlaceholder')}
+                value={evolutionInstanceName}
+                onChange={(e) => setEvolutionInstanceName(e.target.value)}
+                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('evolutionApiKey')}</Label>
+              <div className="relative">
+                <Input
+                  type={showToken ? 'text' : 'password'}
+                  placeholder={t('evolutionApiKeyPlaceholder')}
+                  value={evolutionApiKey}
+                  onChange={(e) => {
+                    setEvolutionApiKey(e.target.value);
+                    setEvolutionApiKeyEdited(true);
+                  }}
+                  onFocus={() => {
+                    if (evolutionApiKey === MASKED_TOKEN) {
+                      setEvolutionApiKey('');
+                      setEvolutionApiKeyEdited(true);
+                    }
+                  }}
+                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
+              {config?.provider === 'evolution' && !evolutionApiKeyEdited && (
+                <p className="text-xs text-muted-foreground">{t('tokenHidden')}</p>
+              )}
+              <p className="text-xs text-muted-foreground">{t('evolutionApiKeyHint')}</p>
+            </div>
+
+            <div className="flex flex-wrap gap-3 pt-2">
+              <Button
+                onClick={handleSaveEvolution}
+                disabled={savingEvolution}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground"
+              >
+                {savingEvolution ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    {t('saving')}
+                  </>
+                ) : (
+                  t('evolutionSaveCredentials')
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleConnectEvolution}
+                disabled={connectingEvolution || !config}
+                className="border-border text-muted-foreground hover:text-foreground hover:bg-muted"
+              >
+                {connectingEvolution ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    {t('evolutionConnecting')}
+                  </>
+                ) : (
+                  <>
+                    <QrCode className="size-4" />
+                    {t('evolutionConnect')}
+                  </>
+                )}
+              </Button>
+            </div>
+
+            {(qrCode || pairingCode) && (
+              <div className="mt-4 flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/40 p-4">
+                {qrCode && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={qrCode.startsWith('data:') ? qrCode : `data:image/png;base64,${qrCode}`}
+                    alt="Evolution pairing QR code"
+                    className="size-48 rounded bg-white p-2"
+                  />
+                )}
+                {pairingCode && (
+                  <code className="text-lg tracking-widest text-foreground">{pairingCode}</code>
+                )}
+                <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <Smartphone className="size-3.5 shrink-0" />
+                  {t('evolutionScanQr')}
+                </p>
+                <p className="text-xs text-primary flex items-center gap-1.5">
+                  <Loader2 className="size-3 animate-spin" />
+                  {t('evolutionWaitingForScan')}
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        )}
+
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3">
           {provider === 'meta' && (
@@ -1151,6 +1479,26 @@ export function WhatsAppConfig() {
               </ol>
               <p className="text-xs text-muted-foreground pt-2 border-t border-border">
                 {t('uazapiTemplatesHidden')}
+              </p>
+            </CardContent>
+          </Card>
+        ) : provider === 'evolution' ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-foreground text-base">{t('setupInstructions')}</CardTitle>
+              <CardDescription className="text-muted-foreground">
+                {t('evolutionCredentialsDesc')}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
+                <li>{t('evolutionBaseUrl')} + {t('evolutionInstanceName')} + {t('evolutionApiKey')}</li>
+                <li>{t('evolutionSaveCredentials')}</li>
+                <li>{t('evolutionConnect')}</li>
+                <li>{t('evolutionScanQr')}</li>
+              </ol>
+              <p className="text-xs text-muted-foreground pt-2 border-t border-border">
+                {t('evolutionTemplatesHidden')}
               </p>
             </CardContent>
           </Card>

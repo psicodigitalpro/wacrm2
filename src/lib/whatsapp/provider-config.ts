@@ -32,6 +32,14 @@ export interface ResolvedWhatsAppConfig {
   /** Decrypted. */
   instanceToken?: string
   pairedPhone?: string
+
+  // ---- evolution ----
+  evolutionBaseUrl?: string
+  evolutionInstanceName?: string
+  evolutionInstanceId?: string
+  /** Decrypted. */
+  evolutionApiKey?: string
+  evolutionPairedPhone?: string
 }
 
 interface WhatsAppConfigRow {
@@ -46,10 +54,15 @@ interface WhatsAppConfigRow {
   instance_id: string | null
   instance_token: string | null
   paired_phone: string | null
+  evolution_base_url: string | null
+  evolution_instance_name: string | null
+  evolution_instance_id: string | null
+  evolution_api_key: string | null
+  evolution_paired_phone: string | null
 }
 
 const CONFIG_COLUMNS =
-  'id, account_id, user_id, provider, phone_number_id, waba_id, access_token, base_url, instance_id, instance_token, paired_phone'
+  'id, account_id, user_id, provider, phone_number_id, waba_id, access_token, base_url, instance_id, instance_token, paired_phone, evolution_base_url, evolution_instance_name, evolution_instance_id, evolution_api_key, evolution_paired_phone'
 
 /**
  * Load whatsapp_config for an account and decrypt whichever token the
@@ -94,6 +107,29 @@ export async function loadWhatsAppConfig(
           .then(({ error: updateError }: { error: { message: string } | null }) => {
             if (updateError) {
               console.warn('[provider-config] instance_token GCM upgrade failed:', updateError.message)
+            }
+          })
+      }
+    }
+    return resolved
+  }
+
+  if (row.provider === 'evolution') {
+    resolved.evolutionBaseUrl = row.evolution_base_url ?? undefined
+    resolved.evolutionInstanceName = row.evolution_instance_name ?? undefined
+    resolved.evolutionInstanceId = row.evolution_instance_id ?? undefined
+    resolved.evolutionPairedPhone = row.evolution_paired_phone ?? undefined
+    if (row.evolution_api_key) {
+      resolved.evolutionApiKey = decrypt(row.evolution_api_key)
+      // Self-heal legacy CBC ciphertexts, same as access_token/instance_token below.
+      if (isLegacyFormat(row.evolution_api_key)) {
+        void db
+          .from('whatsapp_config')
+          .update({ evolution_api_key: encrypt(resolved.evolutionApiKey) })
+          .eq('id', row.id)
+          .then(({ error: updateError }: { error: { message: string } | null }) => {
+            if (updateError) {
+              console.warn('[provider-config] evolution_api_key GCM upgrade failed:', updateError.message)
             }
           })
       }

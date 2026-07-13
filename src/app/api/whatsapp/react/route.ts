@@ -120,9 +120,13 @@ export async function POST(request: Request) {
     // uazapi's given API surface has no reaction endpoint — rather than
     // guess one, fail clearly so the UI can hide/disable the reaction
     // affordance for uazapi accounts instead of silently no-op'ing.
-    if (config.provider === 'uazapi') {
+    // Evolution (Baileys) likely supports sending reactions natively,
+    // but evolution-api.ts doesn't implement it yet (unconfirmed
+    // endpoint) — same explicit-reject treatment until that's built
+    // and verified against a live instance.
+    if (config.provider === 'uazapi' || config.provider === 'evolution') {
       return NextResponse.json(
-        { error: 'Reactions are not supported for uazapi accounts.' },
+        { error: `Reactions are not supported for ${config.provider} accounts yet.` },
         { status: 400 },
       );
     }

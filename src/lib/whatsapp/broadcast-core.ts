@@ -20,6 +20,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
 import { sendUazapiText } from '@/lib/whatsapp/uazapi-api';
+import { sendEvolutionText } from '@/lib/whatsapp/evolution-api';
 import { renderTemplateBodyText } from '@/lib/whatsapp/template-render-text';
 import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config';
 import {
@@ -73,6 +74,9 @@ export interface BroadcastPlan {
   accessToken?: string;
   baseUrl?: string;
   instanceToken?: string;
+  evolutionBaseUrl?: string;
+  evolutionApiKey?: string;
+  evolutionInstanceName?: string;
   templateRow: MessageTemplate | null;
   planned: PlannedRecipient[];
   /** Phones rejected up front (invalid E.164) — counted as failed. */
@@ -243,6 +247,9 @@ export async function createBroadcast(
     accessToken: config.accessToken,
     baseUrl: config.baseUrl,
     instanceToken: config.instanceToken,
+    evolutionBaseUrl: config.evolutionBaseUrl,
+    evolutionApiKey: config.evolutionApiKey,
+    evolutionInstanceName: config.evolutionInstanceName,
     templateRow,
     planned,
     rejected,
@@ -269,10 +276,12 @@ export async function deliverBroadcast(
   let sentCount = 0;
 
   for (const recipient of plan.planned) {
-    // uazapi has no Meta-sandbox allow-list, so it only ever gets one
-    // variant to try.
+    // uazapi/Evolution have no Meta-sandbox allow-list, so they only
+    // ever get one variant to try.
     const variants =
-      plan.provider === 'uazapi' ? [recipient.phone] : phoneVariants(recipient.phone);
+      plan.provider === 'uazapi' || plan.provider === 'evolution'
+        ? [recipient.phone]
+        : phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
     let lastError: string | null = null;
 
@@ -291,6 +300,22 @@ export async function deliverBroadcast(
           result = await sendUazapiText({
             baseUrl: plan.baseUrl!,
             instanceToken: plan.instanceToken!,
+            number: variant,
+            text,
+          });
+        } else if (plan.provider === 'evolution') {
+          // Same rationale as uazapi above — Evolution has no
+          // template-approval system either.
+          if (!plan.templateRow?.body_text) {
+            throw new Error(
+              `Template "${plan.templateName}" not found locally for Evolution fallback`
+            );
+          }
+          const text = renderTemplateBodyText(plan.templateRow.body_text, recipient.params);
+          result = await sendEvolutionText({
+            baseUrl: plan.evolutionBaseUrl!,
+            apiKey: plan.evolutionApiKey!,
+            instanceName: plan.evolutionInstanceName!,
             number: variant,
             text,
           });

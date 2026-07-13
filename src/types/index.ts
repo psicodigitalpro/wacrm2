@@ -266,7 +266,7 @@ export interface MessageReaction {
   created_at: string;
 }
 
-export type WhatsAppProvider = 'meta' | 'uazapi';
+export type WhatsAppProvider = 'meta' | 'uazapi' | 'evolution';
 
 export interface WhatsAppConfig {
   id: string;
@@ -304,6 +304,17 @@ export interface WhatsAppConfig {
   /** Last QR code payload from /instance/connect, shown until paired. */
   qr_code?: string;
   qr_expires_at?: string;
+
+  // ---- Evolution API fields (provider === 'evolution') ----
+  /** Per-account Evolution server URL — self-hosted, not shared across accounts. */
+  evolution_base_url?: string;
+  /** Instance name — used as the path segment for every Evolution API call. */
+  evolution_instance_name?: string;
+  evolution_instance_id?: string;
+  /** Per-instance `hash`/apikey from POST /instance/create (encrypted at rest). */
+  evolution_api_key?: string;
+  /** The WhatsApp number once paired — this provider's analogue of phone_number_id/paired_phone. */
+  evolution_paired_phone?: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)

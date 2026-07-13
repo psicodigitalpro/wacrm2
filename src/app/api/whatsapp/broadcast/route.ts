@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
 import { sendUazapiText } from '@/lib/whatsapp/uazapi-api'
+import { sendEvolutionText } from '@/lib/whatsapp/evolution-api'
 import { renderTemplateBodyText } from '@/lib/whatsapp/template-render-text'
 import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
@@ -190,8 +191,12 @@ export async function POST(request: Request) {
 
       // Retry with phone variants on "not in allowed list" so numbers
       // that differ only in a trunk-prefix 0 still reach recipients.
-      // uazapi has no such allow-list, so it only ever gets one variant.
-      const variants = config.provider === 'uazapi' ? [sanitized] : phoneVariants(sanitized)
+      // uazapi/Evolution have no such allow-list, so they only ever
+      // get one variant.
+      const variants =
+        config.provider === 'uazapi' || config.provider === 'evolution'
+          ? [sanitized]
+          : phoneVariants(sanitized)
       let sentMessageId: string | null = null
       let lastError: string | null = null
 
@@ -211,6 +216,22 @@ export async function POST(request: Request) {
             result = await sendUazapiText({
               baseUrl: config.baseUrl!,
               instanceToken: config.instanceToken!,
+              number: variant,
+              text,
+            })
+          } else if (config.provider === 'evolution') {
+            // Same rationale as uazapi above.
+            if (!templateRow?.body_text) {
+              throw new Error(`Template "${template_name}" not found locally for Evolution fallback`)
+            }
+            const text = renderTemplateBodyText(
+              templateRow.body_text,
+              recipient.messageParams?.body ?? recipient.params,
+            )
+            result = await sendEvolutionText({
+              baseUrl: config.evolutionBaseUrl!,
+              apiKey: config.evolutionApiKey!,
+              instanceName: config.evolutionInstanceName!,
               number: variant,
               text,
             })

@@ -8,6 +8,7 @@ import {
   type MediaKind,
 } from '@/lib/whatsapp/meta-api'
 import { sendUazapiText, sendUazapiMedia, type UazapiMediaKind } from '@/lib/whatsapp/uazapi-api'
+import { sendEvolutionText, sendEvolutionMedia, type EvolutionMediaKind } from '@/lib/whatsapp/evolution-api'
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
 import { loadWhatsAppConfig, type ResolvedWhatsAppConfig } from '@/lib/whatsapp/provider-config'
 import {
@@ -18,10 +19,13 @@ import {
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
 
-/** Phone-variant retry is a Meta sandbox workaround only — uazapi has
- *  no allow-list, so it only ever gets the one sanitized number. */
+/** Phone-variant retry is a Meta sandbox workaround only — uazapi and
+ *  Evolution have no allow-list, so they only ever get the one
+ *  sanitized number. */
 function variantsForProvider(config: ResolvedWhatsAppConfig, sanitized: string): string[] {
-  return config.provider === 'uazapi' ? [sanitized] : phoneVariants(sanitized)
+  return config.provider === 'uazapi' || config.provider === 'evolution'
+    ? [sanitized]
+    : phoneVariants(sanitized)
 }
 
 // ------------------------------------------------------------
@@ -99,6 +103,16 @@ export async function engineSendText(
       const r = await sendUazapiText({
         baseUrl: config.baseUrl!,
         instanceToken: config.instanceToken!,
+        number: phone,
+        text: args.text,
+      })
+      return r.messageId
+    }
+    if (config.provider === 'evolution') {
+      const r = await sendEvolutionText({
+        baseUrl: config.evolutionBaseUrl!,
+        apiKey: config.evolutionApiKey!,
+        instanceName: config.evolutionInstanceName!,
         number: phone,
         text: args.text,
       })
@@ -216,6 +230,19 @@ export async function engineSendMedia(
         number: phone,
         type: args.kind as UazapiMediaKind,
         file: args.link,
+        caption: args.caption,
+      })
+      return r.messageId
+    }
+    if (config.provider === 'evolution') {
+      // Evolution's media kinds line up 1:1 with Meta's too.
+      const r = await sendEvolutionMedia({
+        baseUrl: config.evolutionBaseUrl!,
+        apiKey: config.evolutionApiKey!,
+        instanceName: config.evolutionInstanceName!,
+        number: phone,
+        type: args.kind as EvolutionMediaKind,
+        media: args.link,
         caption: args.caption,
       })
       return r.messageId
@@ -365,11 +392,14 @@ async function sendInteractiveViaMeta(
     throw new Error('WhatsApp not configured for this account')
   }
 
-  // uazapi's given API surface has no interactive button/list endpoint
-  // — fail clearly rather than guess one. The Flows builder should
-  // steer uazapi accounts away from interactive nodes.
-  if (config.provider === 'uazapi') {
-    throw new Error('Interactive (button/list) messages are not supported for uazapi accounts.')
+  // Neither uazapi nor Evolution's client here has a confirmed
+  // interactive button/list endpoint — fail clearly rather than guess
+  // one. (Baileys itself can send button/list-shaped messages, but
+  // WhatsApp deprecated rendering them on recent clients, and this
+  // hasn't been verified against a live Evolution instance.) The Flows
+  // builder should steer these accounts away from interactive nodes.
+  if (config.provider === 'uazapi' || config.provider === 'evolution') {
+    throw new Error(`Interactive (button/list) messages are not supported for ${config.provider} accounts.`)
   }
 
   const attempt = async (phone: string): Promise<string> => {

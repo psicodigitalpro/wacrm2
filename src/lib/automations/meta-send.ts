@@ -1,5 +1,6 @@
 import { sendTextMessage, sendTemplateMessage } from '@/lib/whatsapp/meta-api'
 import { sendUazapiText } from '@/lib/whatsapp/uazapi-api'
+import { sendEvolutionText } from '@/lib/whatsapp/evolution-api'
 import { renderTemplateBodyText } from '@/lib/whatsapp/template-render-text'
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
 import {
@@ -15,10 +16,13 @@ import {
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
 
-/** Phone-variant retry is a Meta sandbox workaround only — uazapi has
- *  no allow-list, so it only ever gets the one sanitized number. */
+/** Phone-variant retry is a Meta sandbox workaround only — uazapi and
+ *  Evolution have no allow-list, so they only ever get the one
+ *  sanitized number. */
 function variantsForProvider(config: ResolvedWhatsAppConfig, sanitized: string): string[] {
-  return config.provider === 'uazapi' ? [sanitized] : phoneVariants(sanitized)
+  return config.provider === 'uazapi' || config.provider === 'evolution'
+    ? [sanitized]
+    : phoneVariants(sanitized)
 }
 
 // ------------------------------------------------------------
@@ -144,11 +148,13 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     throw new Error('WhatsApp not configured for this account')
   }
 
-  // uazapi has no template-approval system — a "template" send there
-  // just means sending the template's rendered body as free-form text.
-  // Resolve it once, up front, so `attempt` doesn't re-fetch per retry.
-  let uazapiRenderedText: string | null = null
-  if (config.provider === 'uazapi' && input.kind === 'template') {
+  // uazapi/Evolution have no template-approval system — a "template"
+  // send there just means sending the template's rendered body as
+  // free-form text. Resolve it once, up front, so `attempt` doesn't
+  // re-fetch per retry.
+  let nonMetaRenderedText: string | null = null
+  const isNonMetaProvider = config.provider === 'uazapi' || config.provider === 'evolution'
+  if (isNonMetaProvider && input.kind === 'template') {
     const { data: templateRow, error: templateErr } = await db
       .from('message_templates')
       .select('body_text')
@@ -157,9 +163,9 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
       .eq('language', input.language || 'en_US')
       .maybeSingle()
     if (templateErr || !templateRow?.body_text) {
-      throw new Error(`Template "${input.templateName}" not found locally for uazapi fallback`)
+      throw new Error(`Template "${input.templateName}" not found locally for ${config.provider} fallback`)
     }
-    uazapiRenderedText = renderTemplateBodyText(templateRow.body_text, input.params)
+    nonMetaRenderedText = renderTemplateBodyText(templateRow.body_text, input.params)
   }
 
   const attempt = async (phone: string): Promise<string> => {
@@ -168,7 +174,17 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
         baseUrl: config.baseUrl!,
         instanceToken: config.instanceToken!,
         number: phone,
-        text: input.kind === 'template' ? uazapiRenderedText! : input.text,
+        text: input.kind === 'template' ? nonMetaRenderedText! : input.text,
+      })
+      return r.messageId
+    }
+    if (config.provider === 'evolution') {
+      const r = await sendEvolutionText({
+        baseUrl: config.evolutionBaseUrl!,
+        apiKey: config.evolutionApiKey!,
+        instanceName: config.evolutionInstanceName!,
+        number: phone,
+        text: input.kind === 'template' ? nonMetaRenderedText! : input.text,
       })
       return r.messageId
     }
@@ -219,17 +235,17 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
 
   // Persist the sent message so it appears in the inbox with a real
   // message id. sender_type='bot' distinguishes automation sends from
-  // manual agent sends. A uazapi template fallback was actually sent
-  // as plain text, so it's persisted as content_type='text' with the
-  // rendered body — not as an unfulfillable 'template' row.
-  const isUazapiTemplateFallback = config.provider === 'uazapi' && input.kind === 'template'
-  const content_type = input.kind === 'template' && !isUazapiTemplateFallback ? 'template' : 'text'
-  const content_text = isUazapiTemplateFallback
-    ? uazapiRenderedText
+  // manual agent sends. A uazapi/Evolution template fallback was
+  // actually sent as plain text, so it's persisted as content_type='text'
+  // with the rendered body — not as an unfulfillable 'template' row.
+  const isNonMetaTemplateFallback = isNonMetaProvider && input.kind === 'template'
+  const content_type = input.kind === 'template' && !isNonMetaTemplateFallback ? 'template' : 'text'
+  const content_text = isNonMetaTemplateFallback
+    ? nonMetaRenderedText
     : input.kind === 'text'
       ? input.text
       : null
-  const template_name = input.kind === 'template' && !isUazapiTemplateFallback ? input.templateName : null
+  const template_name = input.kind === 'template' && !isNonMetaTemplateFallback ? input.templateName : null
 
   const { error: msgErr } = await db.from('messages').insert({
     conversation_id: input.conversationId,
@@ -250,7 +266,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
     .from('conversations')
     .update({
       last_message_text:
-        input.kind === 'template' && !isUazapiTemplateFallback
+        input.kind === 'template' && !isNonMetaTemplateFallback
           ? `[template:${input.templateName}]`
           : content_text!,
       last_message_at: new Date().toISOString(),

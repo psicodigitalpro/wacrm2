@@ -30,6 +30,7 @@ import {
   type MediaKind,
 } from '@/lib/whatsapp/meta-api';
 import { sendUazapiText, sendUazapiMedia, type UazapiMediaKind } from '@/lib/whatsapp/uazapi-api';
+import { sendEvolutionText, sendEvolutionMedia, type EvolutionMediaKind } from '@/lib/whatsapp/evolution-api';
 import {
   validateInteractivePayload,
   interactivePayloadPreviewText,
@@ -339,6 +340,36 @@ export async function sendMessageToConversation(
       return result.messageId;
     }
 
+    if (config.provider === 'evolution') {
+      if (messageType === 'template' || messageType === 'interactive') {
+        throw new SendMessageError(
+          'unsupported_for_provider',
+          `${messageType} messages are not supported for Evolution accounts.`,
+          400
+        );
+      }
+      if (isMediaKind) {
+        const result = await sendEvolutionMedia({
+          baseUrl: config.evolutionBaseUrl!,
+          apiKey: config.evolutionApiKey!,
+          instanceName: config.evolutionInstanceName!,
+          number: phone,
+          type: messageType as EvolutionMediaKind,
+          media: mediaUrl!,
+          caption: contentText || undefined,
+        });
+        return result.messageId;
+      }
+      const result = await sendEvolutionText({
+        baseUrl: config.evolutionBaseUrl!,
+        apiKey: config.evolutionApiKey!,
+        instanceName: config.evolutionInstanceName!,
+        number: phone,
+        text: contentText!,
+      });
+      return result.messageId;
+    }
+
     const accessToken = config.accessToken!;
     const phoneNumberId = config.phoneNumberId!;
 
@@ -416,7 +447,9 @@ export async function sendMessageToConversation(
   let workingPhone = sanitizedPhone;
   try {
     const variants =
-      config.provider === 'uazapi' ? [sanitizedPhone] : phoneVariants(sanitizedPhone);
+      config.provider === 'uazapi' || config.provider === 'evolution'
+        ? [sanitizedPhone]
+        : phoneVariants(sanitizedPhone);
     let lastError: unknown = null;
 
     for (const variant of variants) {
@@ -440,10 +473,11 @@ export async function sendMessageToConversation(
     if (lastError) throw lastError;
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown provider error';
-    const providerLabel = config.provider === 'uazapi' ? 'uazapi' : 'Meta';
+    const providerLabel =
+      config.provider === 'uazapi' ? 'uazapi' : config.provider === 'evolution' ? 'Evolution' : 'Meta';
     console.error(`[send-message] ${providerLabel} send failed for all variants:`, message);
     throw new SendMessageError(
-      config.provider === 'uazapi' ? 'uazapi_error' : 'meta_error',
+      config.provider === 'uazapi' ? 'uazapi_error' : config.provider === 'evolution' ? 'evolution_error' : 'meta_error',
       `${providerLabel} API error: ${message}`,
       502
     );
