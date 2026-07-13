@@ -7,8 +7,9 @@ import {
   type InteractiveListSection,
   type MediaKind,
 } from '@/lib/whatsapp/meta-api'
+import { sendUazapiText, sendUazapiMedia, type UazapiMediaKind } from '@/lib/whatsapp/uazapi-api'
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { loadWhatsAppConfig, type ResolvedWhatsAppConfig } from '@/lib/whatsapp/provider-config'
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -16,6 +17,12 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
+
+/** Phone-variant retry is a Meta sandbox workaround only — uazapi has
+ *  no allow-list, so it only ever gets the one sanitized number. */
+function variantsForProvider(config: ResolvedWhatsAppConfig, sanitized: string): string[] {
+  return config.provider === 'uazapi' ? [sanitized] : phoneVariants(sanitized)
+}
 
 // ------------------------------------------------------------
 // Flows-side Meta sender (interactive variants).
@@ -82,28 +89,31 @@ export async function engineSendText(
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', args.accountId)
-    .single()
-  if (configErr || !config) {
+  const config = await loadWhatsAppConfig(db, args.accountId)
+  if (!config) {
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
-
   const attempt = async (phone: string): Promise<string> => {
+    if (config.provider === 'uazapi') {
+      const r = await sendUazapiText({
+        baseUrl: config.baseUrl!,
+        instanceToken: config.instanceToken!,
+        number: phone,
+        text: args.text,
+      })
+      return r.messageId
+    }
     const r = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      phoneNumberId: config.phoneNumberId!,
+      accessToken: config.accessToken!,
       to: phone,
       text: args.text,
     })
     return r.messageId
   }
 
-  const variants = phoneVariants(sanitized)
+  const variants = variantsForProvider(config, sanitized)
   let workingPhone = sanitized
   let waMessageId = ''
   let lastError: unknown = null
@@ -192,21 +202,27 @@ export async function engineSendMedia(
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', args.accountId)
-    .single()
-  if (configErr || !config) {
+  const config = await loadWhatsAppConfig(db, args.accountId)
+  if (!config) {
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
-
   const attempt = async (phone: string): Promise<string> => {
+    if (config.provider === 'uazapi') {
+      // uazapi's media kinds line up 1:1 with Meta's (image/video/audio/document).
+      const r = await sendUazapiMedia({
+        baseUrl: config.baseUrl!,
+        instanceToken: config.instanceToken!,
+        number: phone,
+        type: args.kind as UazapiMediaKind,
+        file: args.link,
+        caption: args.caption,
+      })
+      return r.messageId
+    }
     const r = await sendMediaMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      phoneNumberId: config.phoneNumberId!,
+      accessToken: config.accessToken!,
       to: phone,
       kind: args.kind,
       link: args.link,
@@ -216,7 +232,7 @@ export async function engineSendMedia(
     return r.messageId
   }
 
-  const variants = phoneVariants(sanitized)
+  const variants = variantsForProvider(config, sanitized)
   let workingPhone = sanitized
   let waMessageId = ''
   let lastError: unknown = null
@@ -344,22 +360,23 @@ async function sendInteractiveViaMeta(
     throw new Error(`contact phone invalid: ${contact.phone}`)
   }
 
-  const { data: config, error: configErr } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', input.accountId)
-    .single()
-  if (configErr || !config) {
+  const config = await loadWhatsAppConfig(db, input.accountId)
+  if (!config) {
     throw new Error('WhatsApp not configured for this account')
   }
 
-  const accessToken = decrypt(config.access_token)
+  // uazapi's given API surface has no interactive button/list endpoint
+  // — fail clearly rather than guess one. The Flows builder should
+  // steer uazapi accounts away from interactive nodes.
+  if (config.provider === 'uazapi') {
+    throw new Error('Interactive (button/list) messages are not supported for uazapi accounts.')
+  }
 
   const attempt = async (phone: string): Promise<string> => {
     if (input.kind === 'buttons') {
       const r = await sendInteractiveButtons({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        phoneNumberId: config.phoneNumberId!,
+        accessToken: config.accessToken!,
         to: phone,
         bodyText: input.bodyText,
         buttons: input.buttons,
@@ -369,8 +386,8 @@ async function sendInteractiveViaMeta(
       return r.messageId
     }
     const r = await sendInteractiveList({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+      phoneNumberId: config.phoneNumberId!,
+      accessToken: config.accessToken!,
       to: phone,
       bodyText: input.bodyText,
       buttonLabel: input.buttonLabel,
@@ -384,7 +401,7 @@ async function sendInteractiveViaMeta(
   // Same phone-variant retry as automations/meta-send.ts. Numbers
   // registered with/without a trunk 0 + Meta's sandbox quirks all
   // need this to reliably land a message.
-  const variants = phoneVariants(sanitized)
+  const variants = variantsForProvider(config, sanitized)
   let workingPhone = sanitized
   let waMessageId = ''
   let lastError: unknown = null

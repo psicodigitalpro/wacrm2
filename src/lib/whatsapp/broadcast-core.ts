@@ -19,7 +19,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api';
-import { decrypt } from '@/lib/whatsapp/encryption';
+import { sendUazapiText } from '@/lib/whatsapp/uazapi-api';
+import { renderTemplateBodyText } from '@/lib/whatsapp/template-render-text';
+import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config';
 import {
   sanitizePhoneForMeta,
   isValidE164,
@@ -27,7 +29,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard';
-import type { MessageTemplate } from '@/types';
+import type { MessageTemplate, WhatsAppProvider } from '@/types';
 import { findOrCreateContact } from '@/lib/api/v1/contacts';
 
 /** Thrown by createBroadcast on a caller-visible failure; route maps it. */
@@ -66,8 +68,11 @@ export interface BroadcastPlan {
   broadcastId: string;
   templateName: string;
   templateLanguage: string;
-  phoneNumberId: string;
-  accessToken: string;
+  provider: WhatsAppProvider;
+  phoneNumberId?: string;
+  accessToken?: string;
+  baseUrl?: string;
+  instanceToken?: string;
   templateRow: MessageTemplate | null;
   planned: PlannedRecipient[];
   /** Phones rejected up front (invalid E.164) — counted as failed. */
@@ -110,20 +115,15 @@ export async function createBroadcast(
   }
 
   // Config (fail fast + provides the audit trail owner already resolved
-  // by the caller). Meta send needs phone_number_id + decrypted token.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
-  if (configError || !config) {
+  // by the caller).
+  const config = await loadWhatsAppConfig(db, accountId);
+  if (!config) {
     throw new BroadcastError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
       400
     );
   }
-  const accessToken = decrypt(config.access_token);
 
   // Template row (once) for header/button components; guard a
   // malformed local row rather than N identical opaque failures.
@@ -238,8 +238,11 @@ export async function createBroadcast(
     broadcastId: broadcast.id,
     templateName,
     templateLanguage,
-    phoneNumberId: config.phone_number_id,
-    accessToken,
+    provider: config.provider,
+    phoneNumberId: config.phoneNumberId,
+    accessToken: config.accessToken,
+    baseUrl: config.baseUrl,
+    instanceToken: config.instanceToken,
     templateRow,
     planned,
     rejected,
@@ -266,21 +269,42 @@ export async function deliverBroadcast(
   let sentCount = 0;
 
   for (const recipient of plan.planned) {
-    const variants = phoneVariants(recipient.phone);
+    // uazapi has no Meta-sandbox allow-list, so it only ever gets one
+    // variant to try.
+    const variants =
+      plan.provider === 'uazapi' ? [recipient.phone] : phoneVariants(recipient.phone);
     let sentMessageId: string | null = null;
     let lastError: string | null = null;
 
     for (const variant of variants) {
       try {
-        const result = await sendTemplateMessage({
-          phoneNumberId: plan.phoneNumberId,
-          accessToken: plan.accessToken,
-          to: variant,
-          templateName: plan.templateName,
-          language: plan.templateLanguage,
-          template: plan.templateRow ?? undefined,
-          params: recipient.params,
-        });
+        let result: { messageId: string };
+        if (plan.provider === 'uazapi') {
+          // uazapi has no template-approval system — send the
+          // template's rendered body as free-form text instead.
+          if (!plan.templateRow?.body_text) {
+            throw new Error(
+              `Template "${plan.templateName}" not found locally for uazapi fallback`
+            );
+          }
+          const text = renderTemplateBodyText(plan.templateRow.body_text, recipient.params);
+          result = await sendUazapiText({
+            baseUrl: plan.baseUrl!,
+            instanceToken: plan.instanceToken!,
+            number: variant,
+            text,
+          });
+        } else {
+          result = await sendTemplateMessage({
+            phoneNumberId: plan.phoneNumberId!,
+            accessToken: plan.accessToken!,
+            to: variant,
+            templateName: plan.templateName,
+            language: plan.templateLanguage,
+            template: plan.templateRow ?? undefined,
+            params: recipient.params,
+          });
+        }
         sentMessageId = result.messageId;
         lastError = null;
         break;

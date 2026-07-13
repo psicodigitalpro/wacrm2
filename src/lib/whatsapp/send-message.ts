@@ -29,12 +29,13 @@ import {
   sendInteractiveList,
   type MediaKind,
 } from '@/lib/whatsapp/meta-api';
+import { sendUazapiText, sendUazapiMedia, type UazapiMediaKind } from '@/lib/whatsapp/uazapi-api';
 import {
   validateInteractivePayload,
   interactivePayloadPreviewText,
   type InteractiveMessagePayload,
 } from '@/lib/whatsapp/interactive';
-import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption';
+import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config';
 import { supabaseAdmin } from '@/lib/flows/admin-client';
 import {
   sanitizePhoneForMeta,
@@ -247,37 +248,17 @@ export async function sendMessageToConversation(
     );
   }
 
-  // WhatsApp config, account-scoped.
-  const { data: config, error: configError } = await db
-    .from('whatsapp_config')
-    .select('*')
-    .eq('account_id', accountId)
-    .single();
+  // WhatsApp config, account-scoped. loadWhatsAppConfig decrypts
+  // whichever token the row's provider actually uses and self-heals
+  // legacy CBC ciphertexts internally.
+  const config = await loadWhatsAppConfig(db, accountId);
 
-  if (configError || !config) {
+  if (!config) {
     throw new SendMessageError(
       'whatsapp_not_configured',
       'WhatsApp not configured. Please set up your WhatsApp integration first.',
       400
     );
-  }
-
-  const accessToken = decrypt(config.access_token);
-
-  // Self-heal legacy CBC ciphertexts. Fire-and-forget; idempotent.
-  if (isLegacyFormat(config.access_token)) {
-    void db
-      .from('whatsapp_config')
-      .update({ access_token: encrypt(accessToken) })
-      .eq('id', config.id)
-      .then(({ error }: { error: { message: string } | null }) => {
-        if (error) {
-          console.warn(
-            '[send-message] access_token GCM upgrade failed:',
-            error.message
-          );
-        }
-      });
   }
 
   // Resolve the reply target to its Meta message_id. The parent must
@@ -330,9 +311,40 @@ export async function sendMessageToConversation(
   }
 
   const attempt = async (phone: string): Promise<string> => {
+    if (config.provider === 'uazapi') {
+      if (messageType === 'template' || messageType === 'interactive') {
+        throw new SendMessageError(
+          'unsupported_for_provider',
+          `${messageType} messages are not supported for uazapi accounts.`,
+          400
+        );
+      }
+      if (isMediaKind) {
+        const result = await sendUazapiMedia({
+          baseUrl: config.baseUrl!,
+          instanceToken: config.instanceToken!,
+          number: phone,
+          type: messageType as UazapiMediaKind,
+          file: mediaUrl!,
+          caption: contentText || undefined,
+        });
+        return result.messageId;
+      }
+      const result = await sendUazapiText({
+        baseUrl: config.baseUrl!,
+        instanceToken: config.instanceToken!,
+        number: phone,
+        text: contentText!,
+      });
+      return result.messageId;
+    }
+
+    const accessToken = config.accessToken!;
+    const phoneNumberId = config.phoneNumberId!;
+
     if (messageType === 'template') {
       const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId,
         accessToken,
         to: phone,
         templateName: templateName!,
@@ -346,7 +358,7 @@ export async function sendMessageToConversation(
     }
     if (isMediaKind) {
       const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId,
         accessToken,
         to: phone,
         kind: messageType as MediaKind,
@@ -361,7 +373,7 @@ export async function sendMessageToConversation(
       const p = interactivePayload!;
       if (p.kind === 'buttons') {
         const result = await sendInteractiveButtons({
-          phoneNumberId: config.phone_number_id,
+          phoneNumberId,
           accessToken,
           to: phone,
           bodyText: p.body,
@@ -373,7 +385,7 @@ export async function sendMessageToConversation(
         return result.messageId;
       }
       const result = await sendInteractiveList({
-        phoneNumberId: config.phone_number_id,
+        phoneNumberId,
         accessToken,
         to: phone,
         bodyText: p.body,
@@ -386,7 +398,7 @@ export async function sendMessageToConversation(
       return result.messageId;
     }
     const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
+      phoneNumberId,
       accessToken,
       to: phone,
       text: contentText!,
@@ -395,13 +407,16 @@ export async function sendMessageToConversation(
     return result.messageId;
   };
 
-  // Send via Meta — retry across phone-number variants if Meta rejects
-  // with "recipient not in allowed list"; persist a working variant
-  // back to the contact so the next send goes straight through.
+  // Send — retry across phone-number variants if Meta rejects with
+  // "recipient not in allowed list" (a Meta sandbox quirk; uazapi has
+  // no such allow-list, so it only ever gets a single variant to try).
+  // Persist a working variant back to the contact so the next send
+  // goes straight through.
   let waMessageId = '';
   let workingPhone = sanitizedPhone;
   try {
-    const variants = phoneVariants(sanitizedPhone);
+    const variants =
+      config.provider === 'uazapi' ? [sanitizedPhone] : phoneVariants(sanitizedPhone);
     let lastError: unknown = null;
 
     for (const variant of variants) {
@@ -424,10 +439,14 @@ export async function sendMessageToConversation(
 
     if (lastError) throw lastError;
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Unknown Meta API error';
-    console.error('[send-message] Meta send failed for all variants:', message);
-    throw new SendMessageError('meta_error', `Meta API error: ${message}`, 502);
+    const message = err instanceof Error ? err.message : 'Unknown provider error';
+    const providerLabel = config.provider === 'uazapi' ? 'uazapi' : 'Meta';
+    console.error(`[send-message] ${providerLabel} send failed for all variants:`, message);
+    throw new SendMessageError(
+      config.provider === 'uazapi' ? 'uazapi_error' : 'meta_error',
+      `${providerLabel} API error: ${message}`,
+      502
+    );
   }
 
   if (workingPhone !== sanitizedPhone) {

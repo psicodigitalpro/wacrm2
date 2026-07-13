@@ -13,6 +13,8 @@ import {
   Zap,
   AlertTriangle,
   RotateCcw,
+  QrCode,
+  Smartphone,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
@@ -29,7 +31,7 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from '@/components/ui/accordion';
-import type { WhatsAppConfig as WhatsAppConfigType } from '@/types';
+import type { WhatsAppConfig as WhatsAppConfigType, WhatsAppProvider } from '@/types';
 
 const MASKED_TOKEN = '••••••••••••••••';
 
@@ -69,6 +71,26 @@ export function WhatsAppConfig() {
   const [verifyToken, setVerifyToken] = useState('');
   const [pin, setPin] = useState('');
   const [tokenEdited, setTokenEdited] = useState(false);
+
+  // Provider picker. Defaults to 'meta' until fetchConfig loads the
+  // saved row — whatsapp_config is one row per account (UNIQUE on
+  // account_id), so this reflects whichever provider is currently
+  // connected, not a per-form preference.
+  const [provider, setProvider] = useState<WhatsAppProvider>('meta');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [instanceToken, setInstanceToken] = useState('');
+  const [instanceTokenEdited, setInstanceTokenEdited] = useState(false);
+  const [instanceName, setInstanceName] = useState('');
+  const [savingUazapi, setSavingUazapi] = useState(false);
+  const [connectingUazapi, setConnectingUazapi] = useState(false);
+  const [qrCode, setQrCode] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [uazapiConnected, setUazapiConnected] = useState(false);
+  const [uazapiPhone, setUazapiPhone] = useState<string | null>(null);
+  // Polls /api/whatsapp/config/uazapi after Connect is clicked, until
+  // status flips to connected — the QR pairing itself happens on the
+  // phone, so this is the only way the UI learns it succeeded.
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // True once /register has succeeded on Meta's side (timestamp set
   // in the row). When false, the saved config is metadata-only and
@@ -113,6 +135,9 @@ export function WhatsAppConfig() {
         console.error('Failed to load config row:', error);
       }
 
+      const rowProvider: WhatsAppProvider = data?.provider ?? 'meta';
+      setProvider(rowProvider);
+
       if (data) {
         setConfig(data);
         setPhoneNumberId(data.phone_number_id || '');
@@ -121,6 +146,12 @@ export function WhatsAppConfig() {
         setVerifyToken('');
         setPin('');
         setTokenEdited(false);
+
+        setBaseUrl(data.base_url || '');
+        setInstanceToken(data.instance_token ? MASKED_TOKEN : '');
+        setInstanceTokenEdited(false);
+        setInstanceName(data.instance_name || '');
+        setUazapiPhone(data.paired_phone || null);
       } else {
         setConfig(null);
         setPhoneNumberId('');
@@ -129,12 +160,35 @@ export function WhatsAppConfig() {
         setVerifyToken('');
         setPin('');
         setTokenEdited(false);
+
+        setBaseUrl('');
+        setInstanceToken('');
+        setInstanceTokenEdited(false);
+        setInstanceName('');
+        setUazapiPhone(null);
       }
       // Clear any stale probe result when reloading the row.
       setRegistrationProbe(null);
+      setQrCode(null);
+      setPairingCode(null);
 
-      // Then verify health via the API (decrypts token + pings Meta)
-      if (data) {
+      // Then verify health via the provider-specific API (decrypts
+      // token + pings Meta or uazapi).
+      if (data && rowProvider === 'uazapi') {
+        try {
+          const res = await fetch('/api/whatsapp/config/uazapi', { method: 'GET' });
+          const payload = await res.json();
+          setUazapiConnected(Boolean(payload.connected));
+          if (payload.phone) setUazapiPhone(payload.phone);
+          setConnectionStatus(payload.connected ? 'connected' : 'disconnected');
+          setResetReason(payload.needs_reset ? 'token_corrupted' : null);
+          setStatusMessage(payload.message || '');
+        } catch (err) {
+          console.error('uazapi health check failed:', err);
+          setUazapiConnected(false);
+          setConnectionStatus('disconnected');
+        }
+      } else if (data) {
         try {
           const res = await fetch('/api/whatsapp/config', { method: 'GET' });
           const payload = await res.json();
@@ -156,6 +210,7 @@ export function WhatsAppConfig() {
         setConnectionStatus('disconnected');
         setResetReason(null);
         setStatusMessage('');
+        setUazapiConnected(false);
       }
     } catch (err) {
       console.error('fetchConfig error:', err);
@@ -278,6 +333,28 @@ export function WhatsAppConfig() {
   }
 
   async function handleTestConnection() {
+    if (provider === 'uazapi') {
+      try {
+        setTesting(true);
+        const res = await fetch('/api/whatsapp/config/uazapi', { method: 'GET' });
+        const payload = await res.json();
+        setUazapiConnected(Boolean(payload.connected));
+        if (payload.phone) setUazapiPhone(payload.phone);
+        setConnectionStatus(payload.connected ? 'connected' : 'disconnected');
+        setStatusMessage(payload.message || '');
+        toast[payload.connected ? 'success' : 'error'](
+          payload.connected ? 'uazapi instance is connected' : payload.message || 'Not connected'
+        );
+      } catch (err) {
+        console.error('uazapi test connection error:', err);
+        setConnectionStatus('disconnected');
+        toast.error('Connection test failed. Check network and try again.');
+      } finally {
+        setTesting(false);
+      }
+      return;
+    }
+
     try {
       setTesting(true);
       const res = await fetch('/api/whatsapp/config', { method: 'GET' });
@@ -340,7 +417,8 @@ export function WhatsAppConfig() {
 
     try {
       setResetting(true);
-      const res = await fetch('/api/whatsapp/config', { method: 'DELETE' });
+      const endpoint = provider === 'uazapi' ? '/api/whatsapp/config/uazapi' : '/api/whatsapp/config';
+      const res = await fetch(endpoint, { method: 'DELETE' });
       const data = await res.json();
 
       if (!res.ok) {
@@ -355,6 +433,14 @@ export function WhatsAppConfig() {
       setAccessToken('');
       setVerifyToken('');
       setTokenEdited(false);
+      setBaseUrl('');
+      setInstanceToken('');
+      setInstanceTokenEdited(false);
+      setInstanceName('');
+      setUazapiConnected(false);
+      setUazapiPhone(null);
+      setQrCode(null);
+      setPairingCode(null);
       setConnectionStatus('disconnected');
       setResetReason(null);
       setStatusMessage('');
@@ -363,6 +449,112 @@ export function WhatsAppConfig() {
       toast.error('Failed to reset configuration');
     } finally {
       setResetting(false);
+    }
+  }
+
+  function stopUazapiPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // Cleanup on unmount so a left-open Settings tab doesn't keep polling
+  // after the component's gone.
+  useEffect(() => stopUazapiPolling, []);
+
+  async function handleSaveUazapi() {
+    if (!baseUrl.trim()) {
+      toast.error('Instance URL is required');
+      return;
+    }
+    if (!config && (!instanceToken.trim() || !instanceTokenEdited)) {
+      toast.error('Instance Token is required for initial setup');
+      return;
+    }
+    if (instanceTokenEdited === false && instanceToken === MASKED_TOKEN) {
+      toast.error('Please re-enter the Instance Token to save changes');
+      return;
+    }
+
+    try {
+      setSavingUazapi(true);
+      const res = await fetch('/api/whatsapp/config/uazapi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_url: baseUrl.trim(),
+          instance_token: instanceToken.trim(),
+          instance_name: instanceName.trim() || null,
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to save configuration');
+        return;
+      }
+
+      toast.success(
+        data.connected
+          ? 'uazapi instance saved and already connected.'
+          : 'uazapi instance saved. Click Connect to pair via QR code.'
+      );
+      if (accountId) await fetchConfig(accountId);
+    } catch (err) {
+      console.error('uazapi save error:', err);
+      toast.error('Failed to save configuration');
+    } finally {
+      setSavingUazapi(false);
+    }
+  }
+
+  async function handleConnectUazapi() {
+    try {
+      setConnectingUazapi(true);
+      setQrCode(null);
+      setPairingCode(null);
+      const res = await fetch('/api/whatsapp/config/uazapi/connect', { method: 'POST' });
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || 'Failed to start pairing');
+        return;
+      }
+
+      setQrCode(data.qr_code || null);
+      setPairingCode(data.pairing_code || null);
+
+      // Poll status every 3s until connected, or for up to 2 minutes
+      // (the QR/pairing code goes stale well before that, so this just
+      // bounds the interval rather than being a meaningful deadline).
+      stopUazapiPolling();
+      let attempts = 0;
+      pollRef.current = setInterval(async () => {
+        attempts += 1;
+        try {
+          const statusRes = await fetch('/api/whatsapp/config/uazapi', { method: 'GET' });
+          const statusPayload = await statusRes.json();
+          if (statusPayload.connected) {
+            stopUazapiPolling();
+            setUazapiConnected(true);
+            setUazapiPhone(statusPayload.phone || null);
+            setConnectionStatus('connected');
+            setQrCode(null);
+            setPairingCode(null);
+            toast.success('WhatsApp connected via uazapi.');
+            if (accountId) await fetchConfig(accountId);
+          }
+        } catch (err) {
+          console.error('uazapi status poll failed:', err);
+        }
+        if (attempts >= 40) stopUazapiPolling();
+      }, 3000);
+    } catch (err) {
+      console.error('uazapi connect error:', err);
+      toast.error('Failed to start pairing');
+    } finally {
+      setConnectingUazapi(false);
     }
   }
 
@@ -396,6 +588,51 @@ export function WhatsAppConfig() {
       <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
       {/* Main config form */}
       <div className="space-y-6">
+        {/* Provider picker — whatsapp_config is one row per account, so
+            switching here changes which provider that row represents.
+            Saving under the other provider overwrites/disconnects
+            whichever was previously configured (see migration 037). */}
+        <Card>
+          <CardContent className="pt-6">
+            <Label className="text-muted-foreground mb-2 block">{t('providerLabel')}</Label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(['meta', 'uazapi'] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setProvider(p)}
+                  className={
+                    'flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ' +
+                    (provider === p
+                      ? 'border-primary bg-primary/5'
+                      : 'border-border bg-muted/40 hover:bg-muted')
+                  }
+                >
+                  {p === 'meta' ? (
+                    <Zap className="size-4 mt-0.5 shrink-0 text-primary" />
+                  ) : (
+                    <QrCode className="size-4 mt-0.5 shrink-0 text-primary" />
+                  )}
+                  <span>
+                    <span className="block text-sm font-medium text-foreground">
+                      {p === 'meta' ? t('providerMeta') : t('providerUazapi')}
+                    </span>
+                    <span className="block text-xs text-muted-foreground mt-0.5">
+                      {p === 'meta' ? t('providerMetaDesc') : t('providerUazapiDesc')}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            {config && config.provider && config.provider !== provider && (
+              <p className="mt-3 text-xs text-amber-400 flex items-center gap-1.5">
+                <AlertTriangle className="size-3.5 shrink-0" />
+                {t('providerSwitchWarning')}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Corrupted-token reset banner */}
         {showResetBanner && (
           <Alert className="bg-amber-950/40 border-amber-600/40">
@@ -431,7 +668,8 @@ export function WhatsAppConfig() {
           </Alert>
         )}
 
-        {/* Connection Status */}
+        {/* Connection Status (Meta) */}
+        {provider === 'meta' && (
         <Alert className="bg-card border-border">
           <div className="flex items-center gap-2">
             {connectionStatus === 'connected' ? (
@@ -450,13 +688,36 @@ export function WhatsAppConfig() {
                 t('notConnectedDesc')}
           </AlertDescription>
         </Alert>
+        )}
+
+        {/* Connection Status (uazapi) */}
+        {provider === 'uazapi' && config && (
+          <Alert className="bg-card border-border">
+            <div className="flex items-center gap-2">
+              {uazapiConnected ? (
+                <CheckCircle2 className="size-4 text-primary" />
+              ) : (
+                <XCircle className="size-4 text-red-500" />
+              )}
+              <AlertTitle className="text-foreground mb-0">
+                {uazapiConnected ? t('uazapiConnected') : t('uazapiNotConnected')}
+              </AlertTitle>
+            </div>
+            <AlertDescription className="text-muted-foreground">
+              {uazapiConnected
+                ? t('uazapiConnectedDesc', { phone: uazapiPhone || '' })
+                : statusMessage || t('uazapiNotConnectedDesc')}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Registration Status — the "is it actually live?" check.
             Credentials being valid is necessary but not sufficient;
             without a successful /register call the number won't
             receive inbound events. Surface this dimension separately
-            so users don't trust a misleading green banner. */}
-        {config && (
+            so users don't trust a misleading green banner. Meta-only —
+            uazapi has no register/subscribe step. */}
+        {provider === 'meta' && config && (
           <Alert
             className={
               isRegistered
@@ -554,7 +815,8 @@ export function WhatsAppConfig() {
           </Alert>
         )}
 
-        {/* API Credentials */}
+        {/* API Credentials (Meta) */}
+        {provider === 'meta' && (
         <Card>
           <CardHeader>
             <CardTitle className="text-foreground">{t('apiCredentialsTitle')}</CardTitle>
@@ -652,8 +914,11 @@ export function WhatsAppConfig() {
             </div>
           </CardContent>
         </Card>
+        )}
 
-        {/* Webhook URL */}
+        {/* Webhook URL (Meta) — uazapi's inbound webhook isn't wired up
+            yet, so this is Meta-only for now. */}
+        {provider === 'meta' && (
         <Card>
           <CardHeader>
             <CardTitle className="text-foreground">{t('webhookTitle')}</CardTitle>
@@ -682,9 +947,135 @@ export function WhatsAppConfig() {
             </div>
           </CardContent>
         </Card>
+        )}
+
+        {/* uazapi Instance — credentials + QR pairing */}
+        {provider === 'uazapi' && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-foreground">{t('uazapiCredentialsTitle')}</CardTitle>
+            <CardDescription className="text-muted-foreground">
+              {t('uazapiCredentialsDesc')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('uazapiBaseUrl')}</Label>
+              <Input
+                placeholder={t('uazapiBaseUrlPlaceholder')}
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('uazapiInstanceToken')}</Label>
+              <div className="relative">
+                <Input
+                  type={showToken ? 'text' : 'password'}
+                  placeholder={t('uazapiInstanceTokenPlaceholder')}
+                  value={instanceToken}
+                  onChange={(e) => {
+                    setInstanceToken(e.target.value);
+                    setInstanceTokenEdited(true);
+                  }}
+                  onFocus={() => {
+                    if (instanceToken === MASKED_TOKEN) {
+                      setInstanceToken('');
+                      setInstanceTokenEdited(true);
+                    }
+                  }}
+                  className="bg-muted border-border text-foreground placeholder:text-muted-foreground pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showToken ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
+              {config?.provider === 'uazapi' && !instanceTokenEdited && (
+                <p className="text-xs text-muted-foreground">{t('tokenHidden')}</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-muted-foreground">{t('uazapiInstanceName')}</Label>
+              <Input
+                placeholder={t('uazapiInstanceNamePlaceholder')}
+                value={instanceName}
+                onChange={(e) => setInstanceName(e.target.value)}
+                className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-3 pt-2">
+              <Button
+                onClick={handleSaveUazapi}
+                disabled={savingUazapi}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground"
+              >
+                {savingUazapi ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    {t('saving')}
+                  </>
+                ) : (
+                  t('uazapiSaveCredentials')
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleConnectUazapi}
+                disabled={connectingUazapi || !config}
+                className="border-border text-muted-foreground hover:text-foreground hover:bg-muted"
+              >
+                {connectingUazapi ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    {t('uazapiConnecting')}
+                  </>
+                ) : (
+                  <>
+                    <QrCode className="size-4" />
+                    {t('uazapiConnect')}
+                  </>
+                )}
+              </Button>
+            </div>
+
+            {(qrCode || pairingCode) && (
+              <div className="mt-4 flex flex-col items-center gap-3 rounded-lg border border-border bg-muted/40 p-4">
+                {qrCode && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={qrCode.startsWith('data:') ? qrCode : `data:image/png;base64,${qrCode}`}
+                    alt="uazapi pairing QR code"
+                    className="size-48 rounded bg-white p-2"
+                  />
+                )}
+                {pairingCode && (
+                  <code className="text-lg tracking-widest text-foreground">{pairingCode}</code>
+                )}
+                <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <Smartphone className="size-3.5 shrink-0" />
+                  {t('uazapiScanQr')}
+                </p>
+                <p className="text-xs text-primary flex items-center gap-1.5">
+                  <Loader2 className="size-3 animate-spin" />
+                  {t('uazapiWaitingForScan')}
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+        )}
 
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3">
+          {provider === 'meta' && (
           <Button
             onClick={handleSave}
             disabled={saving}
@@ -699,6 +1090,7 @@ export function WhatsAppConfig() {
               t('saveConfig')
             )}
           </Button>
+          )}
           <Button
             variant="outline"
             onClick={handleTestConnection}
@@ -742,6 +1134,27 @@ export function WhatsAppConfig() {
 
       {/* Setup Instructions Sidebar */}
       <div>
+        {provider === 'uazapi' ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-foreground text-base">{t('setupInstructions')}</CardTitle>
+              <CardDescription className="text-muted-foreground">
+                {t('uazapiCredentialsDesc')}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground">
+                <li>{t('uazapiBaseUrl')} + {t('uazapiInstanceToken')}</li>
+                <li>{t('uazapiSaveCredentials')}</li>
+                <li>{t('uazapiConnect')}</li>
+                <li>{t('uazapiScanQr')}</li>
+              </ol>
+              <p className="text-xs text-muted-foreground pt-2 border-t border-border">
+                {t('uazapiTemplatesHidden')}
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
         <Card>
           <CardHeader>
             <CardTitle className="text-foreground text-base">{t('setupInstructions')}</CardTitle>
@@ -833,6 +1246,7 @@ export function WhatsAppConfig() {
             </div>
           </CardContent>
         </Card>
+        )}
       </div>
     </div>
     </section>

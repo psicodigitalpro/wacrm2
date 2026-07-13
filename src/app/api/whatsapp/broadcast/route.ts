@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { sendTemplateMessage } from '@/lib/whatsapp/meta-api'
-import { decrypt } from '@/lib/whatsapp/encryption'
+import { sendUazapiText } from '@/lib/whatsapp/uazapi-api'
+import { renderTemplateBodyText } from '@/lib/whatsapp/template-render-text'
+import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config'
 import type { SendTimeParams } from '@/lib/whatsapp/template-send-builder'
 import { isMessageTemplate } from '@/lib/whatsapp/template-row-guard'
 import {
@@ -134,13 +136,9 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('*')
-      .eq('account_id', accountId)
-      .single()
+    const config = await loadWhatsAppConfig(supabase, accountId)
 
-    if (configError || !config) {
+    if (!config) {
       return NextResponse.json(
         {
           error:
@@ -149,8 +147,6 @@ export async function POST(request: Request) {
         { status: 400 }
       )
     }
-
-    const accessToken = decrypt(config.access_token)
 
     // Load the template row once so sendTemplateMessage can build
     // header + button components on each iteration. Loading inside
@@ -194,22 +190,42 @@ export async function POST(request: Request) {
 
       // Retry with phone variants on "not in allowed list" so numbers
       // that differ only in a trunk-prefix 0 still reach recipients.
-      const variants = phoneVariants(sanitized)
+      // uazapi has no such allow-list, so it only ever gets one variant.
+      const variants = config.provider === 'uazapi' ? [sanitized] : phoneVariants(sanitized)
       let sentMessageId: string | null = null
       let lastError: string | null = null
 
       for (const variant of variants) {
         try {
-          const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
-            to: variant,
-            templateName: template_name,
-            language: template_language || 'en_US',
-            template: templateRow ?? undefined,
-            messageParams: recipient.messageParams,
-            params: recipient.params ?? [],
-          })
+          let result: { messageId: string }
+          if (config.provider === 'uazapi') {
+            // uazapi has no template-approval system — send the
+            // template's rendered body as free-form text instead.
+            if (!templateRow?.body_text) {
+              throw new Error(`Template "${template_name}" not found locally for uazapi fallback`)
+            }
+            const text = renderTemplateBodyText(
+              templateRow.body_text,
+              recipient.messageParams?.body ?? recipient.params,
+            )
+            result = await sendUazapiText({
+              baseUrl: config.baseUrl!,
+              instanceToken: config.instanceToken!,
+              number: variant,
+              text,
+            })
+          } else {
+            result = await sendTemplateMessage({
+              phoneNumberId: config.phoneNumberId!,
+              accessToken: config.accessToken!,
+              to: variant,
+              templateName: template_name,
+              language: template_language || 'en_US',
+              template: templateRow ?? undefined,
+              messageParams: recipient.messageParams,
+              params: recipient.params ?? [],
+            })
+          }
           sentMessageId = result.messageId
           lastError = null
           break

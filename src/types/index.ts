@@ -266,15 +266,22 @@ export interface MessageReaction {
   created_at: string;
 }
 
+export type WhatsAppProvider = 'meta' | 'uazapi';
+
 export interface WhatsAppConfig {
   id: string;
   user_id: string;
-  phone_number_id: string;
-  waba_id?: string;
-  access_token: string;
-  verify_token?: string;
+  /** Tenancy key — every query filters by this (see migration 017). */
+  account_id: string;
+  provider: WhatsAppProvider;
   status: 'connected' | 'disconnected';
   connected_at?: string;
+
+  // ---- Meta Cloud API fields (provider === 'meta') ----
+  phone_number_id?: string;
+  waba_id?: string;
+  access_token?: string;
+  verify_token?: string;
   /**
    * Set when POST /{phone_number_id}/register last succeeded. NULL
    * means the number was saved but never actually subscribed for
@@ -285,6 +292,18 @@ export interface WhatsAppConfig {
   subscribed_apps_at?: string;
   /** Last error from /register; cleared on success. */
   last_registration_error?: string;
+
+  // ---- uazapi fields (provider === 'uazapi') ----
+  /** Per-account instance URL — self-hosted or a paid uazapi instance. */
+  base_url?: string;
+  instance_id?: string;
+  instance_token?: string;
+  instance_name?: string;
+  /** The WhatsApp number once paired — uazapi's analogue of phone_number_id. */
+  paired_phone?: string;
+  /** Last QR code payload from /instance/connect, shown until paired. */
+  qr_code?: string;
+  qr_expires_at?: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)

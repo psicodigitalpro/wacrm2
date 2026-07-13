@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
-import { decrypt } from '@/lib/whatsapp/encryption';
+import { loadWhatsAppConfig } from '@/lib/whatsapp/provider-config';
 import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
 import {
   checkRateLimit,
@@ -108,27 +108,31 @@ export async function POST(request: Request) {
       );
     }
 
-    // WhatsApp config + access token. Account-scoped post-multi-user.
-    const { data: config, error: configError } = await supabase
-      .from('whatsapp_config')
-      .select('phone_number_id, access_token')
-      .eq('account_id', accountId)
-      .single();
-
-    if (configError || !config) {
+    // WhatsApp config. Account-scoped post-multi-user.
+    const config = await loadWhatsAppConfig(supabase, accountId);
+    if (!config) {
       return NextResponse.json(
         { error: 'WhatsApp not configured.' },
         { status: 400 },
       );
     }
 
-    const accessToken = decrypt(config.access_token);
+    // uazapi's given API surface has no reaction endpoint — rather than
+    // guess one, fail clearly so the UI can hide/disable the reaction
+    // affordance for uazapi accounts instead of silently no-op'ing.
+    if (config.provider === 'uazapi') {
+      return NextResponse.json(
+        { error: 'Reactions are not supported for uazapi accounts.' },
+        { status: 400 },
+      );
+    }
+
     const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
 
     try {
       await sendReactionMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+        phoneNumberId: config.phoneNumberId!,
+        accessToken: config.accessToken!,
         to: sanitizedPhone,
         targetMessageId: targetMessage.message_id,
         emoji,
