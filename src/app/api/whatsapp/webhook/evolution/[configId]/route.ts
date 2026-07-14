@@ -201,7 +201,7 @@ async function resolveEvolutionMedia(
       messageId,
     })
     base64 = result.base64
-    mimetype = mimetype ?? result.mimetype
+    mimetype = mimetype ?? normalizeMimetype(result.mimetype)
     if (!mediaInfo.fileNameHint && result.fileName) {
       mediaInfo.fileNameHint = result.fileName
     }
@@ -224,6 +224,23 @@ async function resolveEvolutionMedia(
     mimetype ?? 'application/octet-stream',
   )
   return publicUrl
+}
+
+/**
+ * Strip any `;parameter` suffix (e.g. "audio/ogg; codecs=opus" →
+ * "audio/ogg"). Baileys sends real audio/video mimetypes with codec
+ * parameters attached, but the chat-media bucket's allowed_mime_types
+ * (supabase/migrations/023_chat_media.sql) is an exact-match allowlist
+ * of bare types — passing the parameterized string straight through as
+ * the upload's Content-Type gets silently rejected by Supabase Storage,
+ * which resolveEvolutionMedia's caller then swallows as "no media".
+ * Confirmed live (2026-07-14): "audio/ogg; codecs=opus" is exactly what
+ * real voice notes arrive with.
+ */
+function normalizeMimetype(mimetype: string | null): string | null {
+  if (!mimetype) return null
+  const base = mimetype.split(';')[0].trim()
+  return base || null
 }
 
 /** Best-effort file extension from a MIME type's subtype (e.g. "image/webp" → "webp"). */
@@ -420,7 +437,7 @@ function parseEvolutionMessage(data: Record<string, unknown>): ParsedEvolutionMe
         reaction: null,
         mediaInfo: {
           kind: field,
-          mimetype: media.mimetype ?? null,
+          mimetype: normalizeMimetype(media.mimetype ?? null),
           caption: media.caption ?? null,
           fileNameHint: media.fileName ?? null,
           base64Inline: inlineBase64,
