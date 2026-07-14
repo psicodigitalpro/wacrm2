@@ -1,6 +1,9 @@
 import { NextResponse, after } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { computeEvolutionWebhookSecret } from '@/lib/whatsapp/evolution-api'
+import { computeEvolutionWebhookSecret, getBase64FromMediaMessage } from '@/lib/whatsapp/evolution-api'
+import { decrypt } from '@/lib/whatsapp/encryption'
+import { MEDIA_MAX_BYTES } from '@/lib/storage/upload-media'
+import { uploadAccountMediaServer } from '@/lib/storage/upload-media-server'
 import {
   processInboundMessage,
   ALLOWED_CONTENT_TYPES,
@@ -50,11 +53,13 @@ function supabaseAdmin() {
  *     imageMessage | videoMessage | documentMessage | audioMessage |
  *     reactionMessage }, messageTimestamp }, ... }
  * Text parsing here is high-confidence (this shape is consistent
- * across the Baileys ecosystem). Media parsing is best-effort and NOT
- * yet confirmed against a live delivery — see parseEvolutionMessage's
- * media branch. If a payload doesn't match what's expected, this
- * handler logs the raw JSON so the real shape can be read off the logs
- * and the parser adjusted, rather than silently dropping the message.
+ * across the Baileys ecosystem). Media parsing — including the
+ * `message.base64` sibling field used for inline bytes — is confirmed
+ * live (2026-07-14) against real image/audio/sticker deliveries on the
+ * crmeltorosa instance. If a payload doesn't match what's expected,
+ * this handler logs the raw JSON so the real shape can be read off the
+ * logs and the parser adjusted, rather than silently dropping the
+ * message.
  */
 export async function POST(request: Request, { params }: { params: Promise<{ configId: string }> }) {
   const { configId } = await params
@@ -102,7 +107,9 @@ async function processEvolutionWebhook(configId: string, body: Record<string, un
 
   const { data: config, error: configError } = await supabaseAdmin()
     .from('whatsapp_config')
-    .select('id, account_id, user_id, provider, evolution_paired_phone')
+    .select(
+      'id, account_id, user_id, provider, evolution_paired_phone, evolution_base_url, evolution_instance_name, evolution_api_key',
+    )
     .eq('id', configId)
     .maybeSingle()
 
@@ -128,6 +135,23 @@ async function processEvolutionWebhook(configId: string, body: Record<string, un
 
   const pushName = (data.pushName as string | undefined) || normalized.senderPhone
 
+  let mediaUrl: string | null = null
+  let contentText = normalized.contentText
+  if (normalized.mediaInfo) {
+    try {
+      mediaUrl = await resolveEvolutionMedia(normalized.mediaInfo, normalized.messageId, config)
+    } catch (err) {
+      // Best-effort — a media download/upload failure must not drop the
+      // whole message. Fall through with mediaUrl still null; the inbox
+      // renders the "media unavailable" placeholder (same as Meta does
+      // when its own media verification fails).
+      console.error('[webhook/evolution] media resolution failed:', err)
+    }
+    if (!mediaUrl && !contentText) {
+      contentText = `[${normalized.contentType}]`
+    }
+  }
+
   const normalizedMessage: NormalizedInboundMessage = {
     accountId: config.account_id,
     configOwnerUserId: config.user_id,
@@ -136,13 +160,92 @@ async function processEvolutionWebhook(configId: string, body: Record<string, un
     providerMessageId: normalized.messageId,
     timestampMs: normalized.timestampMs,
     contentType: normalized.contentType,
-    contentText: normalized.contentText,
-    mediaUrl: normalized.mediaUrl,
+    contentText,
+    mediaUrl,
     interactiveReplyId: null,
     replyToProviderMessageId: normalized.replyToMessageId,
     reaction: normalized.reaction,
   }
   await processInboundMessage(normalizedMessage)
+}
+
+interface EvolutionConfigRow {
+  id: string
+  account_id: string
+  evolution_base_url: string
+  evolution_instance_name: string
+  evolution_api_key: string
+}
+
+/**
+ * Download a media message's bytes (inline base64 from the webhook
+ * payload, falling back to the getBase64FromMediaMessage REST call when
+ * the payload didn't carry one) and upload them to the `chat-media`
+ * bucket, returning a public URL — or null if the file exceeds the
+ * bucket's size limit.
+ */
+async function resolveEvolutionMedia(
+  mediaInfo: EvolutionMediaInfo,
+  messageId: string,
+  config: EvolutionConfigRow,
+): Promise<string | null> {
+  let base64 = mediaInfo.base64Inline
+  let mimetype = mediaInfo.mimetype
+
+  if (!base64) {
+    const apiKey = decrypt(config.evolution_api_key)
+    const result = await getBase64FromMediaMessage({
+      baseUrl: config.evolution_base_url,
+      apiKey,
+      instanceName: config.evolution_instance_name,
+      messageId,
+    })
+    base64 = result.base64
+    mimetype = mimetype ?? result.mimetype
+    if (!mediaInfo.fileNameHint && result.fileName) {
+      mediaInfo.fileNameHint = result.fileName
+    }
+  }
+
+  const bytes = Buffer.from(base64, 'base64')
+  if (bytes.byteLength > MEDIA_MAX_BYTES) {
+    console.warn(
+      `[webhook/evolution] media for message ${messageId} is ${bytes.byteLength} bytes, over the ${MEDIA_MAX_BYTES}-byte bucket limit — skipping upload.`,
+    )
+    return null
+  }
+
+  const fileName = mediaInfo.fileNameHint ?? `${mediaInfo.kind}.${extFromMimetype(mimetype)}`
+  const { publicUrl } = await uploadAccountMediaServer(
+    'chat-media',
+    config.account_id,
+    fileName,
+    bytes,
+    mimetype ?? 'application/octet-stream',
+  )
+  return publicUrl
+}
+
+/** Best-effort file extension from a MIME type's subtype (e.g. "image/webp" → "webp"). */
+function extFromMimetype(mimetype: string | null): string {
+  if (!mimetype) return 'bin'
+  const subtype = mimetype.split(';')[0].split('/')[1]
+  if (!subtype) return 'bin'
+  // "audio/ogg" style subtypes are already clean; strip vendor prefixes
+  // like "vnd.openxmlformats-officedocument..." down to something short.
+  return subtype.replace(/^x-/, '').split('.').pop()!.slice(0, 20)
+}
+
+interface EvolutionMediaInfo {
+  /** The Baileys message-content kind, e.g. "imageMessage" — used to build a fallback filename. */
+  kind: string
+  mimetype: string | null
+  /** Present only for image/video/document — audio and stickers carry no caption in Baileys. */
+  caption: string | null
+  /** documentMessage carries a real filename; other kinds don't. */
+  fileNameHint: string | null
+  /** Inline bytes from the webhook's `base64: true` option, if present. */
+  base64Inline: string | null
 }
 
 interface ParsedEvolutionMessage {
@@ -155,6 +258,8 @@ interface ParsedEvolutionMessage {
   mediaUrl: string | null
   replyToMessageId: string | null
   reaction: { targetProviderMessageId: string; emoji: string } | null
+  /** Set when this message is a media kind — processEvolutionWebhook resolves it (async) into mediaUrl. */
+  mediaInfo: EvolutionMediaInfo | null
 }
 
 /**
@@ -240,6 +345,7 @@ function parseEvolutionMessage(data: Record<string, unknown>): ParsedEvolutionMe
       mediaUrl: null,
       replyToMessageId: null,
       reaction: { targetProviderMessageId: reactionMessage.key.id ?? '', emoji: reactionMessage.text ?? '' },
+      mediaInfo: null,
     }
   }
 
@@ -259,6 +365,7 @@ function parseEvolutionMessage(data: Record<string, unknown>): ParsedEvolutionMe
       mediaUrl: null,
       replyToMessageId,
       reaction: null,
+      mediaInfo: null,
     }
   }
 
@@ -273,17 +380,20 @@ function parseEvolutionMessage(data: Record<string, unknown>): ParsedEvolutionMe
       mediaUrl: null,
       replyToMessageId,
       reaction: null,
+      mediaInfo: null,
     }
   }
 
-  // Media messages — NOT confirmed against a live delivery yet. With
-  // the webhook registered with base64:true, Evolution is expected to
-  // embed the media inline (field name unconfirmed — commonly seen as
-  // a sibling `base64` string on the media object in the community
-  // Baileys/Evolution ecosystem). We surface the caption as text and
-  // log a warning rather than silently dropping the message, so a real
-  // delivery's exact shape can be read off the logs and this branch
-  // finished — see the module-level comment.
+  // Media messages. Per Baileys' WAProto shape: imageMessage/videoMessage/
+  // documentMessage carry `caption`; audioMessage (voice notes and regular
+  // audio alike — `ptt: true` marks a voice note but both use this same
+  // field) and stickerMessage carry none. `message.base64` — a SIBLING of
+  // the `*Message` object, not nested inside it — is populated when the
+  // webhook was registered with `base64: true` (see setEvolutionWebhook);
+  // when absent, processEvolutionWebhook falls back to
+  // getBase64FromMediaMessage. Confirmed live (2026-07-14) for all three
+  // real deliveries tested — image, audio (ptt voice note), and sticker —
+  // byte-exact against each message's fileLength.
   const mediaKinds: Array<[string, string]> = [
     ['imageMessage', 'image'],
     ['videoMessage', 'video'],
@@ -291,23 +401,30 @@ function parseEvolutionMessage(data: Record<string, unknown>): ParsedEvolutionMe
     ['audioMessage', 'audio'],
     ['stickerMessage', 'image'],
   ]
+  const inlineBase64 = (message.base64 as string | undefined) ?? null
   for (const [field, contentType] of mediaKinds) {
-    const media = message[field] as { caption?: string; base64?: string } | undefined
+    const media = message[field] as
+      | { caption?: string; mimetype?: string; fileName?: string }
+      | undefined
     if (media) {
-      console.warn(
-        `[webhook/evolution] received a ${field} — media download/storage is not implemented yet, only the caption is captured. Raw media object:`,
-        JSON.stringify(media).slice(0, 500),
-      )
+      const resolvedContentType = ALLOWED_CONTENT_TYPES.has(contentType) ? contentType : 'text'
       return {
         senderPhone,
         messageId,
         timestampMs,
         fromMe,
-        contentType: ALLOWED_CONTENT_TYPES.has(contentType) ? contentType : 'text',
-        contentText: media.caption ?? `[${contentType}]`,
+        contentType: resolvedContentType,
+        contentText: media.caption ?? null,
         mediaUrl: null,
         replyToMessageId,
         reaction: null,
+        mediaInfo: {
+          kind: field,
+          mimetype: media.mimetype ?? null,
+          caption: media.caption ?? null,
+          fileNameHint: media.fileName ?? null,
+          base64Inline: inlineBase64,
+        },
       }
     }
   }

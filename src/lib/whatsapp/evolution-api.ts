@@ -272,13 +272,11 @@ export interface SendEvolutionMediaArgs {
 }
 
 /**
- * NOT confirmed against a live instance yet — but sendEvolutionText
- * above turned out to take a FLAT body despite the official docs
- * showing a nested one, so this is written flat too (matching that now
- *-confirmed convention) rather than nested under `mediaMessage` as
- * originally guessed from the docs. Still verify against a live send
- * before relying on it — field names (`mediatype` vs `mediaType`, etc.)
- * are not confirmed.
+ * Confirmed live (2026-07-14) against the crmeltorosa instance — the
+ * flat body `{number, mediatype, media, caption}` was accepted and
+ * delivered a real image with caption, same flat-body convention as
+ * sendEvolutionText (the official docs show a nested `mediaMessage`
+ * wrapper, which is wrong, same as it was for sendText).
  */
 export async function sendEvolutionMedia(args: SendEvolutionMediaArgs): Promise<EvolutionSendResult> {
   const { baseUrl, apiKey, instanceName, number, type, media, caption } = args
@@ -311,6 +309,67 @@ function extractMessageId(data: Record<string, unknown>): string {
     (root.message_id as string | undefined) ??
     ''
   )
+}
+
+// ============================================================
+// Media download
+// ============================================================
+
+export interface GetBase64FromMediaMessageArgs {
+  baseUrl: string
+  apiKey: string
+  instanceName: string
+  /** The provider message id (key.id) of the media message. */
+  messageId: string
+  /** Transcode video to mp4 server-side. Defaults to true — matches the documented example. */
+  convertToMp4?: boolean
+}
+
+export interface GetBase64FromMediaMessageResult {
+  base64: string
+  mimetype: string | null
+  fileName: string | null
+}
+
+/**
+ * Confirmed real via the official docs (docs.evolutionfoundation.com.br,
+ * "Get Base64" page under chat-controller) and corroborated by
+ * community issue reports: POST /chat/getBase64FromMediaMessage/{instanceName}
+ * with body `{ message: { key: { id } }, convertToMp4 }` returns the
+ * media's bytes as base64. Used as a FALLBACK when a webhook delivery's
+ * inline `message.base64` field (set via the `base64: true` webhook
+ * option — see setEvolutionWebhook) is missing, and as the mechanism to
+ * confirm the inline-base64 assumption live in the first place. Exact
+ * response field names not independently verified against v2.3.7 — kept
+ * tolerant of a couple of plausible shapes.
+ */
+export async function getBase64FromMediaMessage(
+  args: GetBase64FromMediaMessageArgs,
+): Promise<GetBase64FromMediaMessageResult> {
+  const { baseUrl, apiKey, instanceName, messageId, convertToMp4 = true } = args
+  const response = await fetch(
+    `${trimBaseUrl(baseUrl)}/chat/getBase64FromMediaMessage/${encodeURIComponent(instanceName)}`,
+    {
+      method: 'POST',
+      headers: evolutionHeaders(apiKey),
+      body: JSON.stringify({ message: { key: { id: messageId } }, convertToMp4 }),
+    },
+  )
+  if (!response.ok) {
+    await throwEvolutionError(response, `Evolution getBase64FromMediaMessage failed: ${response.status}`)
+  }
+  const data = (await response.json()) as Record<string, unknown>
+  const base64 = (data.base64 as string | undefined) ?? ''
+  if (!base64) {
+    throw new Error(
+      `Evolution getBase64FromMediaMessage response had no "base64" field — raw response keys: ${Object.keys(data).join(', ')}`,
+    )
+  }
+  return {
+    base64,
+    mimetype: (data.mimetype as string | undefined) ?? null,
+    fileName: (data.fileName as string | undefined) ?? null,
+  }
 }
 
 // ============================================================
