@@ -54,6 +54,10 @@ clone or fork it to run your own CRM.
   assistants over the [Model Context Protocol](https://modelcontextprotocol.io).
   Read-only by default, opt-in writes. See [docs/mcp.md](./docs/mcp.md)
   (server in [`mcp-server/`](./mcp-server)).
+- **External agent integration** — connect a qualify/schedule/remind
+  agent built elsewhere (n8n, etc.) so its conversations, tags, and
+  handoffs stay visible in wacrm. See
+  [docs/agent-integration.md](./docs/agent-integration.md).
 
 ## Why fork this?
 
