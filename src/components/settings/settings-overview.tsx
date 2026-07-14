@@ -2,12 +2,13 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { ChevronRight, Loader2 } from 'lucide-react';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { useTheme } from '@/hooks/use-theme';
 import { THEMES } from '@/lib/themes';
+import { LOCALE_META } from '@/lib/locales';
 import { CURRENCIES } from '@/lib/currency';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Card } from '@/components/ui/card';
@@ -39,6 +40,7 @@ export function SettingsOverview({
   const { user, profile, accountId, accountRole, defaultCurrency, canManageMembers } =
     useAuth();
   const { mode, theme } = useTheme();
+  const locale = useLocale();
   const t = useTranslations('Settings.overview');
   const tRoles = useTranslations('roles');
   const tSections = useTranslations('Settings.sections');
@@ -216,6 +218,11 @@ export function SettingsOverview({
       section: 'appearance',
       loading: false,
       subtitle: t('appearance', { mode: cap(mode), theme: themeName }),
+    },
+    {
+      section: 'language',
+      loading: false,
+      subtitle: LOCALE_META.find((l) => l.id === locale)?.nativeName ?? locale,
     },
   ];
 

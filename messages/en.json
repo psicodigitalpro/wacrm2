@@ -1543,8 +1543,10 @@
       "profile": "Your profile",
       "security": "Login & security",
       "appearance": "Appearance",
+      "language": "Language",
       "whatsapp": "WhatsApp",
       "templates": "Templates",
+      "quick-replies": "Quick replies",
       "fields": "Fields & tags",
       "deals": "Deals & currency",
       "members": "Team members",
@@ -1615,6 +1617,13 @@
       "active": "Active",
       "accentColor": "Accent color",
       "useTheme": "Use {name} theme"
+    },
+    "language": {
+      "title": "Language",
+      "description": "Choose the language used across the app. Saved to this device — try it, it changes live.",
+      "language": "Language",
+      "active": "Active",
+      "useLanguage": "Use {name}"
     },
     "security": {
       "title": "Login & security",
