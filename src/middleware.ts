@@ -42,6 +42,21 @@ export async function middleware(request: NextRequest) {
     return response
   }
 
+  // Every response now potentially varies per-user (the `wacrm.locale`
+  // cookie drives which language next-intl renders — see
+  // src/i18n/request.ts). The hosting platform's CDN was observed
+  // caching a rendered page (Cache-Control: public, s-maxage=300, no
+  // `Vary: Cookie`) and serving that ONE user's language to every
+  // other visitor for up to 5 minutes — a real cross-user data leak,
+  // not just a stale-content nuisance. Force every response uncacheable
+  // by any shared cache and explicitly vary by Cookie so a CDN that
+  // does respect Vary stops conflating different users' responses.
+  const withNoCache = <T extends NextResponse>(response: T): T => {
+    response.headers.set('Cache-Control', 'private, no-store, max-age=0, must-revalidate')
+    response.headers.append('Vary', 'Cookie')
+    return response
+  }
+
   // Auth pages - redirect to dashboard if already logged in.
   // Exception: when an invite token is in the query string we
   // send the already-signed-in user to /join/<token> instead so
@@ -66,7 +81,7 @@ export async function middleware(request: NextRequest) {
       url.pathname = '/dashboard'
       url.search = ''
     }
-    return withRefreshedCookies(NextResponse.redirect(url))
+    return withNoCache(withRefreshedCookies(NextResponse.redirect(url)))
   }
 
   // Protected pages - redirect to login if not authenticated
@@ -74,18 +89,18 @@ export async function middleware(request: NextRequest) {
   if (!user && protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
-    return withRefreshedCookies(NextResponse.redirect(url))
+    return withNoCache(withRefreshedCookies(NextResponse.redirect(url)))
   }
 
   // API routes that need auth (not webhooks)
   if (!user && request.nextUrl.pathname.startsWith('/api/whatsapp/') &&
       !request.nextUrl.pathname.includes('/webhook')) {
-    return withRefreshedCookies(
+    return withNoCache(withRefreshedCookies(
       NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    )
+    ))
   }
 
-  return supabaseResponse
+  return withNoCache(supabaseResponse)
 }
 
 export const config = {
